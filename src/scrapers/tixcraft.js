@@ -117,7 +117,7 @@ async function scrapeTixcraft(url) {
 
       return items;
     });
-  });
+  }, url);
 
   const sections = rawSections.map(classifySection).sort((a, b) => {
     const order = { available: 0, soldOut: 1, ignored: 2 };

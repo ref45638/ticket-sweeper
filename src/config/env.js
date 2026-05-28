@@ -16,7 +16,7 @@ const config = {
   port: intEnv('PORT', 3000),
   scrapeIntervalMs: intEnv('SCRAPE_INTERVAL_MS', 60_000, 10_000),
   notifyCooldownMs: intEnv('NOTIFY_COOLDOWN_MS', 600_000),
-  puppeteerHeadless: boolEnv('PUPPETEER_HEADLESS', true),
+  browserHeadless: boolEnv('BROWSER_HEADLESS', boolEnv('PUPPETEER_HEADLESS', false)),
   line: {
     token: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
     targetId: process.env.LINE_TARGET_ID || '',

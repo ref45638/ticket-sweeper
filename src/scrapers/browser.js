@@ -1,43 +1,77 @@
-const puppeteer = require('puppeteer-extra');
-const StealthPlugin = require('puppeteer-extra-plugin-stealth');
+const { connect } = require('puppeteer-real-browser');
+const path = require('path');
 const config = require('../config/env');
+const log = require('../logger');
+const { saveCookies, loadCookies } = require('./cookies');
 
-puppeteer.use(StealthPlugin());
+const PROFILE_DIR = path.join(__dirname, '../../data/browser-profile');
 
-const USER_AGENTS = [
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:126.0) Gecko/20100101 Firefox/126.0',
-  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:126.0) Gecko/20100101 Firefox/126.0',
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36 Edg/123.0.0.0',
+// 隨機 viewport 尺寸池，避免每次都是固定 1280×800
+const VIEWPORTS = [
+  { width: 1366, height: 768 },
+  { width: 1440, height: 900 },
+  { width: 1536, height: 864 },
+  { width: 1280, height: 800 },
+  { width: 1920, height: 1080 },
 ];
 
-function randomUA() {
-  return USER_AGENTS[Math.floor(Math.random() * USER_AGENTS.length)];
+function randomViewport() {
+  return VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
 }
 
-let browserPromise = null;
+let browserInstance = null;
+let connectingPromise = null;
 
 async function getBrowser() {
-  if (!browserPromise) {
-    browserPromise = puppeteer
-      .launch({
-        headless: config.puppeteerHeadless ? 'new' : false,
+  if (browserInstance && browserInstance.isConnected()) {
+    return browserInstance;
+  }
+
+  if (connectingPromise) {
+    return connectingPromise;
+  }
+
+  connectingPromise = (async () => {
+    try {
+      log.info('browser', '正在啟動 puppeteer-real-browser…');
+
+      const { browser } = await connect({
+        headless: config.browserHeadless ? 'auto' : false,
+        turnstile: true,
+        fingerprint: true,
+        customConfig: {
+          userDataDir: PROFILE_DIR,
+        },
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
-          '--disable-blink-features=AutomationControlled',
+          // 如果 headless=false，把視窗藏到螢幕外
+          ...(config.browserHeadless ? [] : ['--window-position=-32000,-32000']),
         ],
-      })
-      .catch((err) => {
-        browserPromise = null;
-        throw err;
+        connectOption: {
+          defaultViewport: null,
+        },
+        disableXvfb: false,
       });
-  }
-  return browserPromise;
+
+      browserInstance = browser;
+
+      browser.on('disconnected', () => {
+        log.warn('browser', '瀏覽器已斷開連線');
+        browserInstance = null;
+      });
+
+      log.info('browser', '瀏覽器已啟動（puppeteer-real-browser）');
+      return browser;
+    } catch (err) {
+      browserInstance = null;
+      throw err;
+    } finally {
+      connectingPromise = null;
+    }
+  })();
+
+  return connectingPromise;
 }
 
 async function isBrowserAlive() {
@@ -50,15 +84,15 @@ async function isBrowserAlive() {
 }
 
 async function resetBrowser() {
-  if (browserPromise) {
+  if (browserInstance) {
     try {
-      const browser = await browserPromise;
-      await browser.close();
+      await browserInstance.close();
     } catch {
       /* ignore */
     }
-    browserPromise = null;
+    browserInstance = null;
   }
+  connectingPromise = null;
 }
 
 /**
@@ -82,13 +116,24 @@ async function simulateHumanBehavior(page) {
   await new Promise((r) => setTimeout(r, 300 + Math.floor(Math.random() * 400)));
 }
 
-async function withPage(fn) {
+async function withPage(fn, targetUrl) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {
-    await page.setViewport({ width: 1280, height: 800 });
-    await page.setUserAgent(randomUA());
-    return await fn(page);
+    const vp = randomViewport();
+    await page.setViewport(vp);
+
+    // 載入備份的 cookie（userDataDir 已有第一層持久化，這是雙保險）
+    if (targetUrl) {
+      await loadCookies(page, targetUrl);
+    }
+
+    const result = await fn(page);
+
+    // 訪問後備份 cookie 到磁碟
+    await saveCookies(page);
+
+    return result;
   } finally {
     await page.close().catch(() => {});
   }
