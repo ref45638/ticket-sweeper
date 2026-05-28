@@ -156,7 +156,7 @@ async function simulateHumanBehavior(page) {
   await new Promise((r) => setTimeout(r, 300 + Math.floor(Math.random() * 400)));
 }
 
-async function withPage(fn, targetUrl) {
+async function withPage(fn) {
   const browser = await getBrowser();
   const page = await browser.newPage();
   try {

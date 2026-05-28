@@ -117,7 +117,7 @@ async function scrapeTixcraft(url) {
 
       return items;
     });
-  }, url);
+  });
 
   const sections = rawSections.map(classifySection).sort((a, b) => {
     const order = { available: 0, soldOut: 1, ignored: 2 };
@@ -136,4 +136,4 @@ function matches(url) {
   return /tixcraft\.com\/ticket\/area\//i.test(url);
 }
 
-module.exports = { scrapeTixcraft, matches, shouldIgnoreSection };
+module.exports = { scrapeTixcraft, matches };

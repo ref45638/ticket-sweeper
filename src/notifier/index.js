@@ -81,4 +81,4 @@ function getChannelStatus() {
   };
 }
 
-module.exports = { notifyAvailable, notifyForSiteResult, getChannelStatus };
+module.exports = { notifyForSiteResult, getChannelStatus };

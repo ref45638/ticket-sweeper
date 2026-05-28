@@ -60,7 +60,6 @@ module.exports = {
   getAllResults,
   setSchedulerMeta,
   getSchedulerMeta,
-  getCooldownRemaining,
   markNotified,
   shouldNotify,
 };
