@@ -30,4 +30,4 @@ async function scrapeSite(site) {
   return result;
 }
 
-module.exports = { scrapeSite, resolveScraper, listScraperIds };
+module.exports = { scrapeSite, listScraperIds };

@@ -1,13 +1,14 @@
 const config = require('./config/env');
 const sitesStore = require('./config/sites');
 const { scrapeSite } = require('./scrapers');
-const { resetBrowser } = require('./scrapers/browser');
+const { resetBrowser, triggerAmnesia } = require('./scrapers/browser');
 const state = require('./state');
 const notifier = require('./notifier');
 const log = require('./logger');
 
 let timeoutId = null;
 let scrapeInProgress = false;
+let consecutiveBlocks = 0; // 連續被 WAF 阻擋的次數
 
 function randomDelay(minMs = 3000, maxMs = 8000) {
   const ms = minMs + Math.floor(Math.random() * (maxMs - minMs));
@@ -161,6 +162,27 @@ async function runScrapeCycle() {
     const elapsed = ((Date.now() - startedAt.getTime()) / 1000).toFixed(1);
     const ok = outcomes.filter((o) => o.ok).length;
     log.info('scheduler', `輪詢週期結束 (${elapsed}s) — 成功 ${ok}/${outcomes.length}`);
+    
+    // 檢查是否有被 WAF 阻擋的情況
+    const blocked = outcomes.some(o => 
+      !o.ok && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error)
+    );
+
+    if (blocked) {
+      consecutiveBlocks++;
+      log.warn('scheduler', `偵測到疑似 WAF 阻擋，連續阻擋次數：${consecutiveBlocks}`);
+      if (consecutiveBlocks >= 3) {
+        log.error('scheduler', '連續 3 次被阻擋，觸發強制失憶！');
+        await triggerAmnesia();
+        consecutiveBlocks = 0; // 重置計數
+      }
+    } else if (ok > 0) {
+      // 只要有任何一個站點成功，就代表 Session 狀態正常，歸零阻擋計數
+      if (consecutiveBlocks > 0) {
+        log.info('scheduler', '成功獲取資料，阻擋計數歸零。');
+      }
+      consecutiveBlocks = 0;
+    }
   }
 
   return { outcomes, finishedAt: new Date().toISOString() };
@@ -196,7 +218,6 @@ async function scrapeSiteById(siteId) {
 module.exports = {
   startScheduler,
   stopScheduler,
-  runScrapeCycle,
   scrapeSiteById,
   isScrapeInProgress: () => scrapeInProgress,
 };
