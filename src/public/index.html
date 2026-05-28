@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ticket Sweeper</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Bebas+Neue&family=IBM+Plex+Mono:wght@400;500&family=Source+Sans+3:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="scanlines" aria-hidden="true"></div>
+    <div id="toast-root" class="toast-root" role="status" aria-live="polite"></div>
+
+    <div class="page-shell">
+    <header class="header">
+      <div class="header__brand">
+        <h1 class="header__title">TICKET SWEEPER</h1>
+        <p class="header__sub">清票監控 · 本地雷達</p>
+      </div>
+      <div id="status-pill" class="status-pill status-pill--idle">IDLE</div>
+    </header>
+
+    <section class="status-strip" aria-label="系統狀態" id="status-strip">
+      <div class="status-strip__item">
+        <span class="label">上次輪詢</span>
+        <span class="value mono" id="last-run">—</span>
+      </div>
+      <div class="status-strip__item">
+        <span class="label">下次輪詢</span>
+        <span class="value mono" id="next-run">—</span>
+      </div>
+      <div class="status-strip__item">
+        <span class="label">Browser</span>
+        <span class="value" id="browser-status">
+          <span class="dot dot--unknown" id="browser-dot"></span>
+          <span id="browser-text">—</span>
+        </span>
+      </div>
+      <div class="status-strip__item">
+        <span class="label">站點</span>
+        <span class="value mono" id="sites-count">0 / 0</span>
+      </div>
+      <div class="status-strip__item status-strip__notify">
+        <span class="label">通知</span>
+        <span class="badges">
+          <span class="badge badge--off" id="badge-line">LINE OFF</span>
+          <span class="badge badge--off" id="badge-telegram">TG OFF</span>
+        </span>
+      </div>
+      <button type="button" class="btn btn--ghost btn--sm" id="btn-refresh-all">立即刷新</button>
+    </section>
+
+    <main class="main-grid">
+      <section class="panel" aria-label="監控站點">
+        <div class="panel__head">
+          <h2 class="panel__title">監控站點</h2>
+          <button type="button" class="btn btn--accent btn--sm" id="btn-toggle-form">＋ 新增</button>
+        </div>
+
+        <form class="add-form hidden" id="add-form" aria-label="新增監控">
+          <label>
+            <span>名稱</span>
+            <input type="text" name="label" required placeholder="例：盧廣仲 7/10" />
+          </label>
+          <label>
+            <span>URL</span>
+            <input
+              type="url"
+              name="url"
+              required
+              placeholder="https://teamear.tixcraft.com/ticket/area/..."
+            />
+          </label>
+          <label>
+            <span>Scraper</span>
+            <select name="scraperId" id="scraper-select">
+              <option value="tixcraft">tixcraft</option>
+            </select>
+          </label>
+          <label class="checkbox-row">
+            <input type="checkbox" name="enabled" checked />
+            <span>啟用監控</span>
+          </label>
+          <div class="add-form__actions">
+            <button type="submit" class="btn btn--accent">加入清單</button>
+            <button type="button" class="btn btn--ghost" id="btn-cancel-form">取消</button>
+          </div>
+        </form>
+
+        <div class="table-wrap">
+          <table class="sites-table" id="sites-table">
+            <thead>
+              <tr>
+                <th scope="col">啟用</th>
+                <th scope="col">名稱</th>
+                <th scope="col">URL</th>
+                <th scope="col">上次抓取</th>
+                <th scope="col">操作</th>
+              </tr>
+            </thead>
+            <tbody id="sites-tbody">
+              <tr>
+                <td colspan="5" class="empty-cell">載入中…</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel" aria-label="票區結果">
+        <div class="panel__head">
+          <h2 class="panel__title">票區雷達</h2>
+          <span class="panel__meta mono" id="results-updated">—</span>
+        </div>
+        <div id="results-panel" class="results-panel">
+          <div class="empty-radar">
+            <svg class="radar-svg" viewBox="0 0 120 120" aria-hidden="true">
+              <circle cx="60" cy="60" r="48" fill="none" stroke="currentColor" stroke-width="1" opacity="0.3" />
+              <circle cx="60" cy="60" r="32" fill="none" stroke="currentColor" stroke-width="1" opacity="0.2" />
+              <line x1="60" y1="12" x2="60" y2="108" stroke="currentColor" stroke-width="1" opacity="0.15" />
+              <line x1="12" y1="60" x2="108" y2="60" stroke="currentColor" stroke-width="1" opacity="0.15" />
+            </svg>
+            <p>尚未加入監控 URL</p>
+          </div>
+        </div>
+      </section>
+    </main>
+    </div>
+
+    <script src="/app.js" defer></script>
+  </body>
+</html>

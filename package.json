@@ -1,0 +1,22 @@
+{
+  "name": "ticket-sweeper",
+  "version": "1.0.0",
+  "description": "Local ticket availability monitor with Puppeteer, LINE/Telegram notifications, and Web UI",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "keywords": ["tixcraft", "ticket", "puppeteer", "scraper"],
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "puppeteer": "^24.2.0",
+    "puppeteer-extra": "^3.3.6",
+    "puppeteer-extra-plugin-stealth": "^2.11.2"
+  }
+}
