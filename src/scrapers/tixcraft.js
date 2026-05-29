@@ -39,6 +39,21 @@ function summarize(sections) {
 async function scrapeTixcraft(url) {
   const rawSections = await withPage(async (page) => {
     await page.goto(url, { waitUntil: 'networkidle2', timeout: 45_000 });
+
+    const browser = page.browser();
+    if (!browser._cookieAccepted) {
+      try {
+        const acceptBtn = await page.waitForSelector('#onetrust-accept-btn-handler', { timeout: 3000 });
+        if (acceptBtn) {
+          await acceptBtn.click();
+        }
+      } catch (err) {
+        // 忽略找不到或超時的情況
+      }
+      // 標記這個瀏覽器實例已經處理過 Cookie 視窗
+      browser._cookieAccepted = true;
+    }
+
     await page.waitForSelector('ul.area-list li, .area-list li, ul li', { timeout: 30_000 });
 
     // 模擬人類瀏覽行為
