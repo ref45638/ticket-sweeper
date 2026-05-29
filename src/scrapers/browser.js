@@ -52,6 +52,11 @@ async function getBrowser() {
     try {
       log.info('browser', '正在啟動 puppeteer-real-browser…');
 
+      try {
+        await fs.mkdir(PROFILE_DIR, { recursive: true });
+      } catch (err) {}
+
+
       const { browser } = await connect({
         headless: config.browserHeadless ? 'auto' : false,
         turnstile: true,
@@ -122,8 +127,9 @@ async function triggerAmnesia() {
   try {
     await fs.rm(PROFILE_DIR, { recursive: true, force: true });
     log.info('browser', '已成功刪除 Profile 資料夾 (userDataDir)');
+    await fs.mkdir(PROFILE_DIR, { recursive: true });
   } catch (err) {
-    log.error('browser', `刪除 Profile 資料夾失敗: ${err.message}`);
+    log.error('browser', `刪除或重建 Profile 資料夾失敗: ${err.message}`);
   }
 
   // 重新抽籤決定新的 Viewport 與生命週期
