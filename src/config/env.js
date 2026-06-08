@@ -14,15 +14,20 @@ function intEnv(key, defaultValue, min = 0) {
 
 const config = {
   port: intEnv('PORT', 3000),
-  scrapeIntervalMs: intEnv('SCRAPE_INTERVAL_MS', 60_000, 10_000),
+  scrapeIntervalMs: intEnv('SCRAPE_INTERVAL_MS', 30_000, 10_000),
   notifyCooldownMs: intEnv('NOTIFY_COOLDOWN_MS', 600_000),
   browserHeadless: boolEnv('BROWSER_HEADLESS', boolEnv('PUPPETEER_HEADLESS', false)),
+  ngrokToken: process.env.NGROK_AUTHTOKEN || '',
   line: {
     token: process.env.LINE_CHANNEL_ACCESS_TOKEN || '',
+    channelSecret: process.env.LINE_CHANNEL_SECRET || '',
     targetId: process.env.LINE_TARGET_ID || '',
     enabled() {
       return Boolean(this.token && this.targetId);
     },
+    botEnabled() {
+      return Boolean(this.token && this.channelSecret);
+    }
   },
   telegram: {
     botToken: process.env.TELEGRAM_BOT_TOKEN || '',

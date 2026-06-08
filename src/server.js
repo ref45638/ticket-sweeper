@@ -7,6 +7,9 @@ const log = require('./logger');
 
 const app = express();
 
+const webhookRouter = require('./routes/webhook');
+app.use('/api/webhook', webhookRouter);
+
 app.use(express.json());
 app.use('/api', apiRouter);
 app.use(webRouter);
@@ -16,13 +19,28 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: err.message || 'Internal server error' });
 });
 
-const server = app.listen(config.port, () => {
+const server = app.listen(config.port, async () => {
   log.info('server', `Ticket Sweeper 啟動 http://localhost:${config.port}`);
   log.info('server', `輪詢間隔 ${config.scrapeIntervalMs / 1000}s，通知冷卻 ${config.notifyCooldownMs / 1000}s`);
   log.info(
     'server',
     `通知通道 LINE=${config.line.enabled() ? 'ON' : 'OFF'} Telegram=${config.telegram.enabled() ? 'ON' : 'OFF'}`
   );
+
+  if (config.ngrokToken) {
+    try {
+      const ngrok = require('@ngrok/ngrok');
+      const listener = await ngrok.forward({
+        addr: config.port,
+        authtoken: config.ngrokToken,
+      });
+      log.info('server', `ngrok 已經啟動，您的 Webhook URL 網址為：${listener.url()}/api/webhook`);
+      log.info('server', `請將上方網址貼至 LINE Developers Console 的 Webhook URL 欄位並開啟 Use webhook。`);
+    } catch (e) {
+      log.error('server', 'ngrok 啟動失敗', e);
+    }
+  }
+
   scheduler.startScheduler();
 });
 
