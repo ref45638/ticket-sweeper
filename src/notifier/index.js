@@ -2,6 +2,7 @@ const line = require('./line');
 const telegram = require('./telegram');
 const cooldown = require('./cooldown');
 const log = require('../logger');
+const settings = require('../config/settings');
 
 function formatStockLine(section) {
   if (section.remaining != null && section.remaining > 0) {
@@ -13,32 +14,40 @@ function formatStockLine(section) {
   return '狀態：可購買';
 }
 
-function formatAlert(site, section) {
-  const lines = [
-    '🎫 發現可購票區！',
-    '',
-    `活動：${site.label}`,
-    `區域：${section.name}`,
-    formatStockLine(section),
-    '',
-    site.url,
-  ];
-  if (section.id) lines.splice(4, 0, `ID：${section.id}`);
-  return lines.join('\n');
+function formatAlert(site, sections) {
+  const header = `🎫 【${site.label}】`;
+  const link = `🔗 搶票連結：\n${site.url}`;
+  
+  const status = '🎯 售票狀況：\n' + sections.map((s, index, arr) => {
+    const isLast = index === arr.length - 1;
+    const prefix = isLast ? '└ ' : '├ ';
+    const text = s.remaining !== null ? `🎫 剩 ${s.remaining} 張` : '🔥 熱賣中';
+    return `${prefix}${s.name}：${text}`;
+  }).join('\n');
+  
+  return `${header}\n\n${link}\n\n${status}`;
 }
 
-async function notifyAvailable(site, section) {
-  if (!cooldown.shouldNotify(site.id, section.name)) {
-    return { notified: false, reason: 'cooldown' };
+async function notifyForSiteResult(site, scrapeResult) {
+  const globalSettings = await settings.getSettings();
+  if (globalSettings.notifyEvents && !globalSettings.notifyEvents.ticketFound) {
+    return [{ notified: false, reason: 'disabled_by_settings' }];
   }
 
-  const message = formatAlert(site, section);
+  const available = scrapeResult.sections.filter((s) => s.status === 'available');
+  if (available.length === 0) return [];
+
+  // 過濾掉還在冷卻時間內的區域
+  const toNotify = available.filter((s) => cooldown.shouldNotify(site.id, s.name));
+  if (toNotify.length === 0) return [{ notified: false, reason: 'cooldown' }];
+
+  const message = formatAlert(site, toNotify);
   const results = [];
 
   if (line.isEnabled()) {
     try {
       results.push(await line.send(message));
-      cooldown.markNotified(site.id, section.name);
+      toNotify.forEach((s) => cooldown.markNotified(site.id, s.name));
     } catch (err) {
       log.error('notifier', 'LINE 發送失敗', err.message);
       results.push({ channel: 'line', error: err.message });
@@ -49,7 +58,7 @@ async function notifyAvailable(site, section) {
     try {
       results.push(await telegram.send(message));
       if (!line.isEnabled()) {
-        cooldown.markNotified(site.id, section.name);
+        toNotify.forEach((s) => cooldown.markNotified(site.id, s.name));
       }
     } catch (err) {
       log.error('notifier', 'Telegram 發送失敗', err.message);
@@ -59,19 +68,33 @@ async function notifyAvailable(site, section) {
 
   const anySent = results.some((r) => r.ok);
   if (anySent && line.isEnabled() && telegram.isEnabled()) {
-    cooldown.markNotified(site.id, section.name);
+    toNotify.forEach((s) => cooldown.markNotified(site.id, s.name));
   }
 
-  return { notified: anySent, results };
+  return [{ notified: anySent, results }];
 }
 
-async function notifyForSiteResult(site, scrapeResult) {
-  const available = scrapeResult.sections.filter((s) => s.status === 'available');
-  const outcomes = [];
-  for (const section of available) {
-    outcomes.push(await notifyAvailable(site, section));
+/**
+ * 直接發送訊息到所有啟用的通知管道（無 cooldown 限制）。
+ * 用於加車成功等緊急通知。
+ */
+async function sendDirect(message) {
+  const results = [];
+  if (line.isEnabled()) {
+    try {
+      results.push(await line.send(message));
+    } catch (err) {
+      log.error('notifier', 'LINE 發送失敗 (direct)', err.message);
+    }
   }
-  return outcomes;
+  if (telegram.isEnabled()) {
+    try {
+      results.push(await telegram.send(message));
+    } catch (err) {
+      log.error('notifier', 'Telegram 發送失敗 (direct)', err.message);
+    }
+  }
+  return results;
 }
 
 function getChannelStatus() {
@@ -81,4 +104,4 @@ function getChannelStatus() {
   };
 }
 
-module.exports = { notifyForSiteResult, getChannelStatus };
+module.exports = { notifyForSiteResult, sendDirect, getChannelStatus };
