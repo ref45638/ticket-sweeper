@@ -14,6 +14,21 @@ const api = {
     if (!res.ok) throw new Error('Failed to load results');
     return res.json();
   },
+  async getSettings() {
+    const res = await fetch('/api/settings');
+    if (!res.ok) throw new Error('Failed to load settings');
+    return res.json();
+  },
+  async patchSettings(body) {
+    const res = await fetch('/api/settings', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Update failed');
+    return data;
+  },
   async createSite(body) {
     const res = await fetch('/api/sites', {
       method: 'POST',
@@ -47,6 +62,20 @@ const api = {
     if (!res.ok) throw new Error(data.error || data.error || 'Scrape failed');
     return data;
   },
+  async ocrHealth() {
+    const res = await fetch('/api/ocr/health');
+    return res.json();
+  },
+  async ocrRecognize(imageBase64) {
+    const res = await fetch('/api/ocr', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64: imageBase64 }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'OCR failed');
+    return data;
+  },
 };
 
 const $ = (sel) => document.querySelector(sel);
@@ -76,6 +105,40 @@ function escapeHtml(str) {
     .replace(/>/g, '&gt;')
     .replace(/"/g, '&quot;');
 }
+
+// ===== TAB 切換 =====
+
+function initTabs() {
+  const btns = document.querySelectorAll('.tab-btn:not(.tab-btn--disabled)');
+  btns.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const tabId = btn.dataset.tab;
+      // 切換按鈕 active
+      document.querySelectorAll('.tab-btn').forEach((b) => {
+        b.classList.remove('tab-btn--active');
+        b.setAttribute('aria-selected', 'false');
+      });
+      btn.classList.add('tab-btn--active');
+      btn.setAttribute('aria-selected', 'true');
+      // 切換面板
+      document.querySelectorAll('.tab-panel').forEach((p) => {
+        p.hidden = true;
+        p.classList.remove('tab-panel--active');
+      });
+      const panel = document.getElementById(`tab-${tabId}`);
+      if (panel) {
+        panel.hidden = false;
+        panel.classList.add('tab-panel--active');
+      }
+      // 切到 OCR tab 時檢查健康狀態
+      if (tabId === 'ocr') checkOcrHealth();
+      // 切到設定 tab 時更新 OCR 狀態
+      if (tabId === 'settings') checkOcrHealthForSettings();
+    });
+  });
+}
+
+// ===== 原有 render =====
 
 const render = {
   statusStrip(status) {
@@ -112,6 +175,58 @@ const render = {
     const tgBadge = $('#badge-telegram');
     tgBadge.textContent = status.notifications?.telegram ? 'TG ON' : 'TG OFF';
     tgBadge.className = `badge ${status.notifications?.telegram ? 'badge--on' : 'badge--off'}`;
+
+    const select = $('#scraper-select');
+    if (status.scrapers?.length && select.options.length <= 1) {
+      select.innerHTML = status.scrapers
+        .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`)
+        .join('');
+    }
+  },
+
+  cookieStrip(settings) {
+    const status = $('#cookie-status');
+    const input = $('#cookie-input');
+    const dot = $('#cookie-mode-dot');
+    const text = $('#cookie-mode-text');
+    const icon = $('#cookie-icon');
+    const strip = $('#cookie-strip');
+
+    if (settings.hasTixuisid) {
+      // 顯示遮罩值
+      const masked = settings.tixuisid.length > 8
+        ? settings.tixuisid.slice(0, 4) + '••••' + settings.tixuisid.slice(-4)
+        : '••••••••';
+      status.textContent = masked;
+      input.value = settings.tixuisid;
+      dot.className = 'dot dot--ok';
+      text.textContent = '自動加車模式';
+      icon.classList.add('settings-icon--active');
+    } else {
+      status.textContent = '未設定';
+      input.value = '';
+      dot.className = 'dot dot--unknown';
+      text.textContent = '僅監控';
+      icon.classList.remove('settings-icon--active');
+    }
+
+    // 同步票數
+    const qtyInput = $('#qty-input');
+    qtyInput.value = settings.ticketQuantity || 1;
+
+    // 同步推播事件設定
+    const notifyEvents = settings.notifyEvents || {};
+    const notifyFound = $('#notify-ticketFound');
+    const notifyCaptcha = $('#notify-cartManualCaptcha');
+    const notifySuccess = $('#notify-cartSuccess');
+    const notifyFailure = $('#notify-cartFailure');
+    const notifyError = $('#notify-scraperError');
+
+    if (notifyFound) notifyFound.checked = notifyEvents.ticketFound !== false;
+    if (notifyCaptcha) notifyCaptcha.checked = notifyEvents.cartManualCaptcha !== false;
+    if (notifySuccess) notifySuccess.checked = notifyEvents.cartSuccess !== false;
+    if (notifyFailure) notifyFailure.checked = notifyEvents.cartFailure === true;
+    if (notifyError) notifyError.checked = notifyEvents.scraperError !== false;
   },
 
   sitesTable(sites) {
@@ -230,12 +345,15 @@ async function refreshStatus() {
   try {
     const status = await api.getStatus();
     render.statusStrip(status);
-    const select = $('#scraper-select');
-    if (status.scrapers?.length && select.options.length <= 1) {
-      select.innerHTML = status.scrapers
-        .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`)
-        .join('');
-    }
+  } catch (err) {
+    toast(err.message);
+  }
+}
+
+async function refreshSettings() {
+  try {
+    const data = await api.getSettings();
+    render.cookieStrip(data);
   } catch (err) {
     toast(err.message);
   }
@@ -260,7 +378,61 @@ async function refreshResults() {
 }
 
 async function refreshAll() {
-  await Promise.all([refreshStatus(), refreshSites(), refreshResults()]);
+  await Promise.all([refreshStatus(), refreshSettings(), refreshSites(), refreshResults()]);
+}
+
+function bindCookieStrip() {
+  const input = $('#cookie-input');
+  const qtyInput = $('#qty-input');
+  const saveBtn = $('#btn-save-cookie');
+  const clearBtn = $('#btn-clear-cookie');
+
+  saveBtn.addEventListener('click', async () => {
+    const value = input.value.trim();
+    if (!value) {
+      toast('請輸入 TIXUISID Cookie 值');
+      input.focus();
+      return;
+    }
+    const qty = parseInt(qtyInput.value, 10) || 1;
+    try {
+      await api.patchSettings({ tixuisid: value, ticketQuantity: qty });
+      toast(`已啟用自動加車模式（${qty} 張）`);
+      await refreshSettings();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  // 票數變更時自動儲存
+  qtyInput.addEventListener('change', async () => {
+    const qty = parseInt(qtyInput.value, 10) || 1;
+    try {
+      await api.patchSettings({ ticketQuantity: qty });
+      toast(`票數已更新為 ${qty} 張`);
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  clearBtn.addEventListener('click', async () => {
+    try {
+      await api.patchSettings({ tixuisid: '' });
+      toast('已清除 Cookie，恢復僅監控模式');
+      input.value = '';
+      await refreshSettings();
+    } catch (err) {
+      toast(err.message);
+    }
+  });
+
+  // Enter 鍵直接儲存
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') {
+      e.preventDefault();
+      saveBtn.click();
+    }
+  });
 }
 
 function bindFormSubmit() {
@@ -343,7 +515,10 @@ const poll = {
       await refreshResults();
       await refreshSites();
     }, 15_000);
-    statusTimer = setInterval(refreshStatus, 5_000);
+    statusTimer = setInterval(() => {
+      refreshStatus();
+      refreshSettings();
+    }, 5_000);
   },
   stop() {
     if (pollTimer) clearInterval(pollTimer);
@@ -351,10 +526,243 @@ const poll = {
   },
 };
 
+function bindNotifyToggles() {
+  const toggles = [
+    { id: 'notify-ticketFound', key: 'ticketFound' },
+    { id: 'notify-cartManualCaptcha', key: 'cartManualCaptcha' },
+    { id: 'notify-cartSuccess', key: 'cartSuccess' },
+    { id: 'notify-cartFailure', key: 'cartFailure' },
+    { id: 'notify-scraperError', key: 'scraperError' },
+  ];
+
+  toggles.forEach(({ id, key }) => {
+    const el = $('#' + id);
+    if (el) {
+      el.addEventListener('change', async () => {
+        try {
+          const payload = { notifyEvents: { [key]: el.checked } };
+          await api.patchSettings(payload);
+          toast('推播設定已更新');
+        } catch (err) {
+          toast(err.message);
+          el.checked = !el.checked; // 發生錯誤時回復原狀
+        }
+      });
+    }
+  });
+}
+
+// ===== OCR 驗證器 =====
+
+const ocrHistory = [];
+
+async function checkOcrHealth() {
+  const dot = $('#ocr-health-dot');
+  const text = $('#ocr-health-text');
+  try {
+    const data = await api.ocrHealth();
+    if (data.status === 'ok' && data.model_loaded) {
+      dot.className = 'dot dot--ok';
+      text.textContent = 'OCR Server 已連線';
+    } else if (data.status === 'ok') {
+      dot.className = 'dot dot--bad';
+      text.textContent = '模型未載入';
+    } else {
+      dot.className = 'dot dot--bad';
+      text.textContent = 'OCR Server 無法連線';
+    }
+  } catch {
+    dot.className = 'dot dot--bad';
+    text.textContent = 'OCR Server 無法連線';
+  }
+}
+
+async function checkOcrHealthForSettings() {
+  const dot = $('#ocr-settings-dot');
+  const text = $('#ocr-settings-text');
+  const status = $('#ocr-settings-status');
+  try {
+    const data = await api.ocrHealth();
+    if (data.status === 'ok' && data.model_loaded) {
+      dot.className = 'dot dot--ok';
+      text.textContent = '已連線';
+      status.textContent = 'http://127.0.0.1:8000';
+    } else if (data.status === 'ok') {
+      dot.className = 'dot dot--bad';
+      text.textContent = '模型未載入';
+      status.textContent = '伺服器在線但模型未就緒';
+    } else {
+      dot.className = 'dot dot--bad';
+      text.textContent = '離線';
+      status.textContent = '無法連線至 OCR Server';
+    }
+  } catch {
+    dot.className = 'dot dot--bad';
+    text.textContent = '離線';
+    status.textContent = '無法連線至 OCR Server';
+  }
+}
+
+function fileToBase64(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+function showPreview(dataUrl) {
+  const preview = $('#ocr-preview');
+  const img = $('#ocr-preview-img');
+  img.src = dataUrl;
+  preview.classList.remove('hidden');
+  $('#ocr-result').classList.add('hidden');
+}
+
+function clearOcr() {
+  $('#ocr-preview').classList.add('hidden');
+  $('#ocr-result').classList.add('hidden');
+  $('#ocr-preview-img').src = '';
+}
+
+function renderOcrHistory() {
+  const list = $('#ocr-history-list');
+  if (!ocrHistory.length) {
+    list.innerHTML = '<div class="ocr-history-empty"><p>尚無辨識紀錄</p></div>';
+    return;
+  }
+  list.innerHTML = ocrHistory
+    .map(
+      (item) => `
+    <div class="ocr-history-item">
+      <img class="ocr-history-item__img" src="${item.imgSrc}" alt="驗證碼" />
+      <div class="ocr-history-item__info">
+        <span class="ocr-history-item__text">${escapeHtml(item.text)}</span>
+        <span class="ocr-history-item__time mono">${item.time} · ${item.ms}ms</span>
+      </div>
+    </div>`
+    )
+    .join('');
+}
+
+async function handleOcrFile(file) {
+  if (!file || !file.type.startsWith('image/')) {
+    toast('請上傳圖片檔案');
+    return;
+  }
+  const dataUrl = await fileToBase64(file);
+  showPreview(dataUrl);
+}
+
+async function doOcrRecognize() {
+  const img = $('#ocr-preview-img');
+  const resultEl = $('#ocr-result');
+  const resultText = $('#ocr-result-text');
+  const resultMeta = $('#ocr-result-meta');
+  const btn = $('#ocr-recognize-btn');
+
+  if (!img.src) return;
+
+  btn.classList.add('loading');
+  const startTime = performance.now();
+
+  try {
+    const data = await api.ocrRecognize(img.src);
+    const elapsed = Math.round(performance.now() - startTime);
+
+    if (data.success) {
+      resultText.textContent = data.text;
+      resultMeta.textContent = `耗時 ${elapsed}ms`;
+      resultEl.classList.remove('hidden');
+
+      // 加入歷史
+      ocrHistory.unshift({
+        imgSrc: img.src,
+        text: data.text,
+        time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+        ms: elapsed,
+      });
+      if (ocrHistory.length > 50) ocrHistory.pop();
+      renderOcrHistory();
+    } else {
+      toast(`辨識失敗: ${data.error}`);
+    }
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    btn.classList.remove('loading');
+  }
+}
+
+function bindOcr() {
+  const dropzone = $('#ocr-dropzone');
+  const fileInput = $('#ocr-file-input');
+
+  // 檔案選擇
+  fileInput.addEventListener('change', (e) => {
+    if (e.target.files?.[0]) handleOcrFile(e.target.files[0]);
+  });
+
+  // 拖放
+  dropzone.addEventListener('dragover', (e) => {
+    e.preventDefault();
+    dropzone.classList.add('ocr-dropzone--dragover');
+  });
+  dropzone.addEventListener('dragleave', () => {
+    dropzone.classList.remove('ocr-dropzone--dragover');
+  });
+  dropzone.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dropzone.classList.remove('ocr-dropzone--dragover');
+    if (e.dataTransfer.files?.[0]) handleOcrFile(e.dataTransfer.files[0]);
+  });
+
+  // 剪貼簿貼上 (全域)
+  document.addEventListener('paste', (e) => {
+    // 只在 OCR tab 可見時處理
+    const ocrTab = $('#tab-ocr');
+    if (ocrTab.hidden) return;
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    for (const item of items) {
+      if (item.type.startsWith('image/')) {
+        e.preventDefault();
+        handleOcrFile(item.getAsFile());
+        return;
+      }
+    }
+  });
+
+  // 辨識按鈕
+  $('#ocr-recognize-btn').addEventListener('click', doOcrRecognize);
+
+  // 清除按鈕
+  $('#ocr-clear-btn').addEventListener('click', clearOcr);
+
+  // 複製結果
+  $('#ocr-copy-btn').addEventListener('click', () => {
+    const text = $('#ocr-result-text').textContent;
+    navigator.clipboard.writeText(text).then(() => toast('已複製到剪貼簿'));
+  });
+
+  // 清除歷史
+  $('#ocr-clear-history').addEventListener('click', () => {
+    ocrHistory.length = 0;
+    renderOcrHistory();
+  });
+}
+
+// ===== Init =====
+
 async function init() {
+  initTabs();
+  bindCookieStrip();
+  bindNotifyToggles();
   bindFormSubmit();
   bindTableActions();
   bindChrome();
+  bindOcr();
   await refreshAll();
   poll.start();
 }

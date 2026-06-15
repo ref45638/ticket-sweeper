@@ -25,6 +25,37 @@
       <div id="status-pill" class="status-pill status-pill--idle">IDLE</div>
     </header>
 
+    <!-- ===== TAB 導航列 ===== -->
+    <nav class="tab-nav" role="tablist" aria-label="功能頁面切換">
+      <button role="tab" class="tab-btn tab-btn--active" aria-selected="true" data-tab="monitor" id="tab-btn-monitor">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="2" y="3" width="20" height="14" rx="2" ry="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+        監控中心
+      </button>
+      <button role="tab" class="tab-btn" aria-selected="false" data-tab="ocr" id="tab-btn-ocr">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+        OCR 驗證器
+      </button>
+      <button role="tab" class="tab-btn" aria-selected="false" data-tab="settings" id="tab-btn-settings">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06A1.65 1.65 0 0 0 4.68 15a1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06A1.65 1.65 0 0 0 9 4.68a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06A1.65 1.65 0 0 0 19.4 9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"/></svg>
+        系統設定
+      </button>
+      <button role="tab" class="tab-btn tab-btn--disabled" aria-selected="false" data-tab="logs" disabled id="tab-btn-logs">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/></svg>
+        事件日誌
+        <span class="tab-badge">SOON</span>
+      </button>
+      <button role="tab" class="tab-btn tab-btn--disabled" aria-selected="false" data-tab="stats" disabled id="tab-btn-stats">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><line x1="18" y1="20" x2="18" y2="10"/><line x1="12" y1="20" x2="12" y2="4"/><line x1="6" y1="20" x2="6" y2="14"/></svg>
+        統計資料
+        <span class="tab-badge">SOON</span>
+      </button>
+    </nav>
+
+    <!-- ========================================== -->
+    <!-- TAB PANEL 1: 監控中心 (現有內容原封不動)     -->
+    <!-- ========================================== -->
+    <div role="tabpanel" class="tab-panel tab-panel--active" id="tab-monitor" aria-labelledby="tab-btn-monitor">
+
     <section class="status-strip" aria-label="系統狀態" id="status-strip">
       <div class="status-strip__item">
         <span class="label">上次輪詢</span>
@@ -130,7 +161,295 @@
         </div>
       </section>
     </main>
+
+    </div><!-- end tab-monitor -->
+
+    <!-- ========================================== -->
+    <!-- TAB PANEL 2: OCR 驗證器                     -->
+    <!-- ========================================== -->
+    <div role="tabpanel" class="tab-panel" id="tab-ocr" aria-labelledby="tab-btn-ocr" hidden>
+
+      <section class="ocr-page">
+        <!-- OCR 狀態列 -->
+        <div class="ocr-status-bar">
+          <div class="ocr-status-bar__left">
+            <span class="dot dot--unknown" id="ocr-health-dot"></span>
+            <span class="mono" id="ocr-health-text">檢查中…</span>
+          </div>
+          <span class="ocr-status-bar__hint mono">支援拖放、點擊上傳、或 Ctrl+V 貼上圖片</span>
+        </div>
+
+        <div class="ocr-layout">
+          <!-- 左側：上傳區 -->
+          <div class="ocr-upload-col">
+            <div class="ocr-dropzone" id="ocr-dropzone" tabindex="0" role="button" aria-label="點擊或拖放上傳驗證碼圖片">
+              <svg class="ocr-dropzone__icon" width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+                <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/>
+                <polyline points="17 8 12 3 7 8"/>
+                <line x1="12" y1="3" x2="12" y2="15"/>
+              </svg>
+              <p class="ocr-dropzone__text">拖放驗證碼圖片至此</p>
+              <p class="ocr-dropzone__sub">或點擊選擇檔案</p>
+              <input type="file" id="ocr-file-input" accept="image/*" class="ocr-file-input" aria-hidden="true" tabindex="-1" />
+            </div>
+
+            <!-- 圖片預覽 -->
+            <div class="ocr-preview hidden" id="ocr-preview">
+              <div class="ocr-preview__head">
+                <span class="mono">預覽</span>
+                <button type="button" class="btn btn--ghost btn--sm" id="ocr-clear-btn">清除</button>
+              </div>
+              <div class="ocr-preview__img-wrap">
+                <img id="ocr-preview-img" alt="驗證碼預覽" />
+              </div>
+              <button type="button" class="btn btn--accent" id="ocr-recognize-btn">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+                辨識驗證碼
+              </button>
+            </div>
+
+            <!-- 辨識結果 -->
+            <div class="ocr-result hidden" id="ocr-result">
+              <div class="ocr-result__head">
+                <span class="mono">辨識結果</span>
+              </div>
+              <div class="ocr-result__body">
+                <span class="ocr-result__text" id="ocr-result-text"></span>
+                <button type="button" class="btn btn--ghost btn--sm" id="ocr-copy-btn" title="複製結果">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                  複製
+                </button>
+              </div>
+              <div class="ocr-result__meta mono" id="ocr-result-meta"></div>
+            </div>
+          </div>
+
+          <!-- 右側：歷史紀錄 -->
+          <div class="ocr-history-col">
+            <div class="panel">
+              <div class="panel__head">
+                <h2 class="panel__title">辨識歷史</h2>
+                <button type="button" class="btn btn--ghost btn--sm" id="ocr-clear-history">清除</button>
+              </div>
+              <div class="ocr-history-list" id="ocr-history-list">
+                <div class="ocr-history-empty">
+                  <p>尚無辨識紀錄</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+    </div><!-- end tab-ocr -->
+
+    <!-- ========================================== -->
+    <!-- TAB PANEL 3: 系統設定                       -->
+    <!-- ========================================== -->
+    <div role="tabpanel" class="tab-panel" id="tab-settings" aria-labelledby="tab-btn-settings" hidden>
+
+      <section class="settings-page">
+        <div class="settings-page__header">
+          <h2 class="panel__title">系統設定</h2>
+        </div>
+
+        <!-- TIXUISID Row -->
+        <div class="settings-card" id="cookie-strip">
+          <div class="settings-card__head">
+            <div class="settings-icon" id="cookie-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
+              </svg>
+            </div>
+            <div class="settings-info">
+              <span class="settings-label">TIXUISID</span>
+              <span class="settings-status mono" id="cookie-status">未設定</span>
+            </div>
+            <span class="settings-mode" id="cookie-mode-badge">
+              <span class="dot dot--unknown" id="cookie-mode-dot"></span>
+              <span id="cookie-mode-text">僅監控</span>
+            </span>
+          </div>
+          <div class="settings-card__body">
+            <div class="settings-card__input-row">
+              <input
+                type="text"
+                class="settings-input"
+                id="cookie-input"
+                placeholder="貼上 TIXUISID Cookie 值…"
+                spellcheck="false"
+                autocomplete="off"
+              />
+              <button type="button" class="btn btn--accent btn--sm" id="btn-save-cookie">儲存</button>
+              <button type="button" class="btn btn--ghost btn--sm btn--danger" id="btn-clear-cookie">清除</button>
+            </div>
+          </div>
+        </div>
+
+        <!-- Ticket Quantity Row -->
+        <div class="settings-card">
+          <div class="settings-card__head">
+            <div class="settings-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="7" width="20" height="10" rx="2" ry="2"/>
+                <path d="M2 12h20M6 7v10M18 7v10"/>
+              </svg>
+            </div>
+            <div class="settings-info">
+              <span class="settings-label">自動搶票數量</span>
+              <span class="settings-status" style="font-size: 0.75rem; color: var(--text-muted, var(--text-secondary));">不足時將選擇最大可用張數</span>
+            </div>
+          </div>
+          <div class="settings-card__body">
+            <input
+              type="number"
+              class="settings-qty-input"
+              id="qty-input"
+              min="1"
+              max="10"
+              value="1"
+              aria-label="購買票數"
+            />
+          </div>
+        </div>
+
+        <!-- Notification Events Settings (expanded, no modal) -->
+        <div class="settings-card">
+          <div class="settings-card__head">
+            <div class="settings-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"></path>
+                <path d="M13.73 21a2 2 0 0 1-3.46 0"></path>
+              </svg>
+            </div>
+            <div class="settings-info">
+              <span class="settings-label">推播事件設定</span>
+              <span class="settings-status" style="font-size: 0.75rem; color: var(--text-muted, var(--text-secondary));">設定哪些情況下需要發送通知至 LINE / Telegram</span>
+            </div>
+          </div>
+          <div class="settings-card__body">
+            <div class="notification-toggles">
+              <!-- 純監控有票 -->
+              <label class="toggle-row">
+                <div class="toggle-row__text">
+                  <span class="toggle-row__title">發現有票 (純監控)</span>
+                  <span class="toggle-row__desc">掃描到票區有空位時通知</span>
+                </div>
+                <div class="switch">
+                  <input type="checkbox" id="notify-ticketFound" class="switch-input" aria-label="發現有票通知">
+                  <span class="switch-slider"></span>
+                </div>
+              </label>
+
+              <!-- 需要手動驗證碼 -->
+              <label class="toggle-row">
+                <div class="toggle-row__text">
+                  <span class="toggle-row__title">需要手動驗證碼</span>
+                  <span class="toggle-row__desc">自動加車需人工接手時通知</span>
+                </div>
+                <div class="switch">
+                  <input type="checkbox" id="notify-cartManualCaptcha" class="switch-input" aria-label="需要手動驗證碼通知">
+                  <span class="switch-slider"></span>
+                </div>
+              </label>
+
+              <!-- 加車成功 -->
+              <label class="toggle-row">
+                <div class="toggle-row__text">
+                  <span class="toggle-row__title">成功加車 / 準備搶票</span>
+                  <span class="toggle-row__desc">鎖票或準備搶票時通知</span>
+                </div>
+                <div class="switch">
+                  <input type="checkbox" id="notify-cartSuccess" class="switch-input" aria-label="加車成功通知">
+                  <span class="switch-slider"></span>
+                </div>
+              </label>
+
+              <!-- 加車失敗 -->
+              <label class="toggle-row">
+                <div class="toggle-row__text">
+                  <span class="toggle-row__title">加車失敗</span>
+                  <span class="toggle-row__desc">嘗試加車失敗時通知 (建議關閉防洗版)</span>
+                </div>
+                <div class="switch">
+                  <input type="checkbox" id="notify-cartFailure" class="switch-input" aria-label="加車失敗通知">
+                  <span class="switch-slider"></span>
+                </div>
+              </label>
+
+              <!-- 爬蟲異常錯誤 -->
+              <label class="toggle-row">
+                <div class="toggle-row__text">
+                  <span class="toggle-row__title">爬蟲異常錯誤</span>
+                  <span class="toggle-row__desc">系統遇到阻擋或其他錯誤時通知</span>
+                </div>
+                <div class="switch">
+                  <input type="checkbox" id="notify-scraperError" class="switch-input" aria-label="爬蟲異常錯誤通知">
+                  <span class="switch-slider"></span>
+                </div>
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <!-- OCR Server 連線狀態 -->
+        <div class="settings-card">
+          <div class="settings-card__head">
+            <div class="settings-icon" aria-hidden="true">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <rect x="2" y="2" width="20" height="8" rx="2" ry="2"/>
+                <rect x="2" y="14" width="20" height="8" rx="2" ry="2"/>
+                <line x1="6" y1="6" x2="6.01" y2="6"/>
+                <line x1="6" y1="18" x2="6.01" y2="18"/>
+              </svg>
+            </div>
+            <div class="settings-info">
+              <span class="settings-label">OCR Server</span>
+              <span class="settings-status mono" id="ocr-settings-status">檢查中…</span>
+            </div>
+            <span class="settings-mode">
+              <span class="dot dot--unknown" id="ocr-settings-dot"></span>
+              <span class="mono" id="ocr-settings-text">—</span>
+            </span>
+          </div>
+        </div>
+
+      </section>
+
+    </div><!-- end tab-settings -->
+
+    <!-- ========================================== -->
+    <!-- TAB PANEL 4: 事件日誌 (預留)                -->
+    <!-- ========================================== -->
+    <div role="tabpanel" class="tab-panel" id="tab-logs" aria-labelledby="tab-btn-logs" hidden>
+      <section class="coming-soon-page">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+          <polyline points="14 2 14 8 20 8"/>
+          <line x1="16" y1="13" x2="8" y2="13"/>
+          <line x1="16" y1="17" x2="8" y2="17"/>
+        </svg>
+        <h2 class="coming-soon-page__title">事件日誌</h2>
+        <p class="coming-soon-page__desc">即時系統運作日誌 — 即將推出</p>
+      </section>
     </div>
+
+    <!-- ========================================== -->
+    <!-- TAB PANEL 5: 統計資料 (預留)                -->
+    <!-- ========================================== -->
+    <div role="tabpanel" class="tab-panel" id="tab-stats" aria-labelledby="tab-btn-stats" hidden>
+      <section class="coming-soon-page">
+        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+          <line x1="18" y1="20" x2="18" y2="10"/>
+          <line x1="12" y1="20" x2="12" y2="4"/>
+          <line x1="6" y1="20" x2="6" y2="14"/>
+        </svg>
+        <h2 class="coming-soon-page__title">統計資料</h2>
+        <p class="coming-soon-page__desc">掃描數據與票區歷史分析 — 即將推出</p>
+      </section>
+    </div>
+
+    </div><!-- end page-shell -->
 
     <script src="/app.js" defer></script>
   </body>

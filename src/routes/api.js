@@ -5,6 +5,7 @@ const scheduler = require('../scheduler');
 const { isBrowserAlive } = require('../scrapers/browser');
 const notifier = require('../notifier');
 const { listScraperIds } = require('../scrapers');
+const settings = require('../config/settings');
 const log = require('../logger');
 
 const router = express.Router();
@@ -64,20 +65,22 @@ router.get('/results', async (req, res) => {
   const stored = state.getAllResults();
   const byId = new Map(stored.map((r) => [r.siteId, r]));
 
-  const payload = sites.map((site) => {
-    const data = byId.get(site.id);
-    return {
-      id: site.id,
-      label: site.label,
-      url: site.url,
-      enabled: site.enabled,
-      scraperId: site.scraperId,
-      lastScrapedAt: data?.lastScrapedAt ?? null,
-      error: data?.error ?? null,
-      sections: data?.sections ?? [],
-      summary: data?.summary ?? { availableCount: 0, soldOutCount: 0, ignoredCount: 0 },
-    };
-  });
+  const payload = sites
+    .filter((site) => site.enabled)
+    .map((site) => {
+      const data = byId.get(site.id);
+      return {
+        id: site.id,
+        label: site.label,
+        url: site.url,
+        enabled: site.enabled,
+        scraperId: site.scraperId,
+        lastScrapedAt: data?.lastScrapedAt ?? null,
+        error: data?.error ?? null,
+        sections: data?.sections ?? [],
+        summary: data?.summary ?? { availableCount: 0, soldOutCount: 0, ignoredCount: 0 },
+      };
+    });
 
   res.json({
     updatedAt: new Date().toISOString(),
@@ -133,6 +136,56 @@ router.post('/sites/:id/scrape', async (req, res) => {
       return res.status(404).json({ error: err.message });
     }
     res.status(500).json({ error: err.message });
+  }
+});
+
+router.get('/settings', async (_req, res) => {
+  const data = await settings.getSettings();
+  res.json({
+    tixuisid: data.tixuisid || '',
+    hasTixuisid: Boolean(data.tixuisid),
+    ticketQuantity: data.ticketQuantity || 1,
+    notifyEvents: data.notifyEvents || {},
+  });
+});
+
+router.patch('/settings', async (req, res) => {
+  const data = await settings.patchSettings(req.body);
+  res.json({
+    tixuisid: data.tixuisid || '',
+    hasTixuisid: Boolean(data.tixuisid),
+    ticketQuantity: data.ticketQuantity || 1,
+    notifyEvents: data.notifyEvents || {},
+  });
+});
+
+// ===== OCR Proxy =====
+const OCR_BASE = 'http://127.0.0.1:8000';
+
+router.get('/ocr/health', async (_req, res) => {
+  try {
+    const r = await fetch(`${OCR_BASE}/health`, { signal: AbortSignal.timeout(3000) });
+    const data = await r.json();
+    res.json(data);
+  } catch {
+    res.json({ status: 'unreachable', model_loaded: false });
+  }
+});
+
+router.post('/ocr', async (req, res) => {
+  const { image_base64 } = req.body;
+  if (!image_base64) return res.status(400).json({ success: false, error: 'Missing image_base64' });
+  try {
+    const r = await fetch(`${OCR_BASE}/ocr/base64`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64 }),
+      signal: AbortSignal.timeout(10000),
+    });
+    const data = await r.json();
+    res.json(data);
+  } catch (err) {
+    res.status(502).json({ success: false, error: `OCR Server 無法連線: ${err.message}` });
   }
 });
 
