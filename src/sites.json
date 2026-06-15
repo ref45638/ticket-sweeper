@@ -1,26 +1,34 @@
 [
-    {
-        "id": "a427bb23-7154-479f-ae40-33cd44bf7478",
-        "label": "盧廣仲 HeartBreakFast 傷心早餐店演唱會 7/10",
-        "url": "https://teamear.tixcraft.com/ticket/area/26_crowdtpkh/22184",
-        "scraperId": "tixcraft",
-        "enabled": true,
-        "createdAt": "2026-05-27T09:25:48.108Z"
-    },
-    {
-        "id": "d1d982d4-7fcb-40af-9121-ad06fdcfacb8",
-        "label": "盧廣仲 HeartBreakFast 傷心早餐店演唱會 7/11",
-        "url": "https://teamear.tixcraft.com/ticket/area/26_crowdtpkh/22185",
-        "scraperId": "tixcraft",
-        "enabled": true,
-        "createdAt": "2026-05-27T11:02:30.253Z"
-    },
-    {
-        "id": "a578ba58-5179-41ff-9945-0df1f5e37a97",
-        "label": "盧廣仲 HeartBreakFast 傷心早餐店演唱會 7/12",
-        "url": "https://teamear.tixcraft.com/ticket/area/26_crowdtpkh/22186",
-        "scraperId": "tixcraft",
-        "enabled": true,
-        "createdAt": "2026-05-27T09:17:13.203Z"
-    }
+  {
+    "id": "a427bb23-7154-479f-ae40-33cd44bf7478",
+    "label": "盧廣仲 HeartBreakFast 傷心早餐店演唱會 7/10",
+    "url": "https://teamear.tixcraft.com/ticket/area/26_crowdtpkh/22184",
+    "scraperId": "tixcraft",
+    "enabled": false,
+    "createdAt": "2026-05-27T09:25:48.108Z"
+  },
+  {
+    "id": "d1d982d4-7fcb-40af-9121-ad06fdcfacb8",
+    "label": "盧廣仲 HeartBreakFast 傷心早餐店演唱會 7/11",
+    "url": "https://teamear.tixcraft.com/ticket/area/26_crowdtpkh/22185",
+    "scraperId": "tixcraft",
+    "enabled": false,
+    "createdAt": "2026-05-27T11:02:30.253Z"
+  },
+  {
+    "id": "a578ba58-5179-41ff-9945-0df1f5e37a97",
+    "label": "盧廣仲 HeartBreakFast 傷心早餐店演唱會 7/12",
+    "url": "https://teamear.tixcraft.com/ticket/area/26_crowdtpkh/22186",
+    "scraperId": "tixcraft",
+    "enabled": false,
+    "createdAt": "2026-05-27T09:17:13.203Z"
+  },
+  {
+    "id": "d7eccf35-ff27-4b3d-b107-8a2c969f3fa4",
+    "label": "圭賢20週年Fanmeeting 6/27",
+    "url": "https://tixcraft.com/ticket/area/26_kyuhyun/22386",
+    "scraperId": "tixcraft",
+    "enabled": true,
+    "createdAt": "2026-06-10T09:06:49.350Z"
+  }
 ]
