@@ -1,0 +1,11 @@
+{
+  "tixuisid": "gmfukc859ultlafqmbocs80v90",
+  "ticketQuantity": 2,
+  "notifyEvents": {
+    "ticketFound": false,
+    "cartManualCaptcha": true,
+    "cartSuccess": true,
+    "cartFailure": false,
+    "scraperError": true
+  }
+}
