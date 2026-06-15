@@ -1,16 +1,18 @@
 const config = require('./config/env');
 const sitesStore = require('./config/sites');
 const { scrapeSite } = require('./scrapers');
+const { fetchCaptcha } = require('./scrapers/tixcraft');
 const { resetBrowser, triggerAmnesia } = require('./scrapers/browser');
 const state = require('./state');
 const notifier = require('./notifier');
 const log = require('./logger');
+const settings = require('./config/settings');
 
 let timeoutId = null;
 let scrapeInProgress = false;
 let consecutiveBlocks = 0; // 連續被 WAF 阻擋的次數
 
-function randomDelay(minMs = 3000, maxMs = 8000) {
+function randomDelay(minMs = 3000, maxMs = 5000) {
   const ms = minMs + Math.floor(Math.random() * (maxMs - minMs));
   return new Promise((r) => setTimeout(r, ms));
 }
@@ -104,6 +106,37 @@ async function scrapeOneSite(site) {
       log.info('notifier', `已發送通知: ${site.label}`);
     }
 
+    // 加車流程結果通知
+    if (result.cartResult) {
+      const globalSettings = await settings.getSettings();
+      const notifyEvents = globalSettings.notifyEvents || {};
+      
+      let cartMsg = '';
+      let shouldNotify = false;
+
+      if (result.cartResult.needManualCaptcha) {
+        if (notifyEvents.cartManualCaptcha !== false) {
+          shouldNotify = true;
+          cartMsg = `🚨 搶票中！已為您填好票數與條款\n\n活動：${site.label}\n\n⚠️ 需要手動填寫驗證碼！\n請立即切換到瀏覽器視窗完成操作！\n\n⏰ 鎖票保留約 10 分鐘`;
+        }
+      } else if (result.cartResult.success) {
+        if (notifyEvents.cartSuccess !== false) {
+          shouldNotify = true;
+          cartMsg = `🎉 發現有票，準備搶票！\n\n活動：${site.label}\n${result.cartResult.message}\n\n${site.url}`;
+        }
+      } else {
+        if (notifyEvents.cartFailure === true) {
+          shouldNotify = true;
+          cartMsg = `⚠️ 加車失敗\n\n活動：${site.label}\n原因：${result.cartResult.message}`;
+        }
+      }
+
+      if (shouldNotify) {
+        await notifier.sendDirect(cartMsg);
+        log.info('notifier', `已發送加車通知: ${result.cartResult.message}`);
+      }
+    }
+
     return { siteId: site.id, ok: true };
   } catch (err) {
     log.error('scraper', `失敗: ${site.label}`, err.message);
@@ -116,6 +149,17 @@ async function scrapeOneSite(site) {
       sections: [],
       summary: { availableCount: 0, soldOutCount: 0, ignoredCount: 0 },
     });
+
+    try {
+      const globalSettings = await settings.getSettings();
+      if (globalSettings.notifyEvents && globalSettings.notifyEvents.scraperError !== false) {
+        // 為了避免太過頻繁通知，這裡其實可以做冷卻，但暫時直接送
+        await notifier.sendDirect(`⚠️ 爬蟲發生錯誤\n\n活動：${site.label}\n錯誤：${err.message}`);
+      }
+    } catch (e) {
+      // ignore
+    }
+
     return { siteId: site.id, ok: false, error: err.message };
   }
 }
@@ -149,12 +193,17 @@ async function runScrapeCycle() {
       outcomes.push(await scrapeOneSite(site));
       await randomDelay();
     }
+
+    // 偷抓拓元驗證碼圖片
+    log.info('scheduler', '偷抓拓元驗證碼圖片');
+    await fetchCaptcha();
   } catch (err) {
     log.error('scheduler', '週期異常', err.message);
     state.setSchedulerMeta({ lastError: err.message });
     if (/Target closed|Session closed|Protocol error/i.test(err.message)) {
       log.warn('scheduler', '重置 Puppeteer browser');
-      await resetBrowser();
+      await resetBrowser('scout');
+      await resetBrowser('killer');
     }
   } finally {
     scrapeInProgress = false;
@@ -162,10 +211,10 @@ async function runScrapeCycle() {
     const elapsed = ((Date.now() - startedAt.getTime()) / 1000).toFixed(1);
     const ok = outcomes.filter((o) => o.ok).length;
     log.info('scheduler', `輪詢週期結束 (${elapsed}s) — 成功 ${ok}/${outcomes.length}`);
-    
+
     // 檢查是否有被 WAF 阻擋的情況
-    const blocked = outcomes.some(o => 
-      !o.ok && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error)
+    const blocked = outcomes.some(
+      (o) => !o.ok && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error)
     );
 
     if (blocked) {
@@ -173,7 +222,7 @@ async function runScrapeCycle() {
       log.warn('scheduler', `偵測到疑似 WAF 阻擋，連續阻擋次數：${consecutiveBlocks}`);
       if (consecutiveBlocks >= 3) {
         log.error('scheduler', '連續 3 次被阻擋，觸發強制失憶！');
-        await triggerAmnesia();
+        await triggerAmnesia('scout');
         consecutiveBlocks = 0; // 重置計數
       }
     } else if (ok > 0) {

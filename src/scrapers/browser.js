@@ -5,7 +5,10 @@ const config = require('../config/env');
 const log = require('../logger');
 // 移除自訂 cookie 保存，全面信任 userDataDir 的 SQLite
 
-const PROFILE_DIR = path.join(__dirname, '../../data/browser-profile');
+const PROFILE_DIRS = {
+  scout: path.join(__dirname, '../../data/browser-profile-scout'),
+  killer: path.join(__dirname, '../../data/browser-profile-killer'),
+};
 
 const VIEWPORTS = [
   { width: 1366, height: 768 },
@@ -15,9 +18,20 @@ const VIEWPORTS = [
   { width: 1920, height: 1080 },
 ];
 
-let currentViewport = VIEWPORTS[1];
-let profileCreatedAt = Date.now();
-let profileLifetimeMs = getRandomLifetime();
+let currentViewports = {
+  scout: VIEWPORTS[1],
+  killer: VIEWPORTS[2],
+};
+
+let profileCreatedAt = {
+  scout: Date.now(),
+  killer: Date.now(),
+};
+
+let profileLifetimeMs = {
+  scout: getRandomLifetime(),
+  killer: getRandomLifetime(),
+};
 
 function getRandomLifetime() {
   // 6 到 12 小時的毫秒數
@@ -30,45 +44,48 @@ function getRandomViewport() {
   return VIEWPORTS[Math.floor(Math.random() * VIEWPORTS.length)];
 }
 
-let browserInstance = null;
-let connectingPromise = null;
+const browserInstances = { scout: null, killer: null };
+const connectingPromises = { scout: null, killer: null };
 
-async function getBrowser() {
+async function getBrowser(role = 'scout') {
+  if (!['scout', 'killer'].includes(role)) {
+    role = 'scout';
+  }
+
   // 檢查是否達到失憶時間
-  if (Date.now() - profileCreatedAt > profileLifetimeMs) {
-    log.warn('browser', `Profile 生命週期已達 ${Math.round(profileLifetimeMs / 3600000)} 小時，觸發定期失憶！`);
-    await triggerAmnesia();
+  if (Date.now() - profileCreatedAt[role] > profileLifetimeMs[role]) {
+    log.warn('browser', `[${role.toUpperCase()}] Profile 生命週期已達 ${Math.round(profileLifetimeMs[role] / 3600000)} 小時，觸發定期失憶！`);
+    await triggerAmnesia(role);
   }
 
-  if (browserInstance && browserInstance.isConnected()) {
-    return browserInstance;
+  if (browserInstances[role] && browserInstances[role].isConnected()) {
+    return browserInstances[role];
   }
 
-  if (connectingPromise) {
-    return connectingPromise;
+  if (connectingPromises[role]) {
+    return connectingPromises[role];
   }
 
-  connectingPromise = (async () => {
+  connectingPromises[role] = (async () => {
     try {
-      log.info('browser', '正在啟動 puppeteer-real-browser…');
+      log.info('browser', `[${role.toUpperCase()}] 正在啟動 puppeteer-real-browser…`);
 
       try {
-        await fs.mkdir(PROFILE_DIR, { recursive: true });
+        await fs.mkdir(PROFILE_DIRS[role], { recursive: true });
       } catch (err) {}
-
 
       const { browser } = await connect({
         headless: config.browserHeadless ? 'auto' : false,
         turnstile: true,
         fingerprint: true,
         customConfig: {
-          userDataDir: PROFILE_DIR,
+          userDataDir: PROFILE_DIRS[role],
         },
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
           // 如果 headless=false，把視窗藏到螢幕外
-          ...(config.browserHeadless ? [] : ['--window-position=-32000,-32000']),
+          ...(config.browserHeadless ? [] : ['--window-position=0,0']),
         ],
         connectOption: {
           defaultViewport: null,
@@ -76,69 +93,73 @@ async function getBrowser() {
         disableXvfb: false,
       });
 
-      browserInstance = browser;
+      browserInstances[role] = browser;
 
       browser.on('disconnected', () => {
-        log.warn('browser', '瀏覽器已斷開連線');
-        browserInstance = null;
+        log.warn('browser', `[${role.toUpperCase()}] 瀏覽器已斷開連線`);
+        browserInstances[role] = null;
       });
 
-      log.info('browser', '瀏覽器已啟動（puppeteer-real-browser）');
+      log.info('browser', `[${role.toUpperCase()}] 瀏覽器已啟動`);
       return browser;
     } catch (err) {
-      browserInstance = null;
+      browserInstances[role] = null;
       throw err;
     } finally {
-      connectingPromise = null;
+      connectingPromises[role] = null;
     }
   })();
 
-  return connectingPromise;
+  return connectingPromises[role];
 }
 
-async function isBrowserAlive() {
+async function isBrowserAlive(role = 'scout') {
   try {
-    const browser = await getBrowser();
+    const browser = await getBrowser(role);
     return browser.isConnected();
   } catch {
     return false;
   }
 }
 
-async function resetBrowser() {
-  if (browserInstance) {
-    try {
-      await browserInstance.close();
-    } catch {
-      /* ignore */
+async function resetBrowser(role = 'all') {
+  const rolesToReset = role === 'all' ? ['scout', 'killer'] : [role];
+  
+  for (const r of rolesToReset) {
+    if (browserInstances[r]) {
+      try {
+        await browserInstances[r].close();
+      } catch {
+        /* ignore */
+      }
+      browserInstances[r] = null;
     }
-    browserInstance = null;
+    connectingPromises[r] = null;
   }
-  connectingPromise = null;
 }
 
 /**
  * 執行失憶：關閉瀏覽器、刪除 Profile 資料夾、重新抽籤
  */
-async function triggerAmnesia() {
-  log.info('browser', '執行失憶程序：清理 Profile 並更換特徵...');
-  await resetBrowser();
+async function triggerAmnesia(role = 'scout') {
+  log.info('browser', `[${role.toUpperCase()}] 執行失憶程序：清理 Profile 並更換特徵...`);
+  await resetBrowser(role);
   
   try {
-    await fs.rm(PROFILE_DIR, { recursive: true, force: true });
-    log.info('browser', '已成功刪除 Profile 資料夾 (userDataDir)');
-    await fs.mkdir(PROFILE_DIR, { recursive: true });
+    await fs.rm(PROFILE_DIRS[role], { recursive: true, force: true });
+    log.info('browser', `[${role.toUpperCase()}] 已成功刪除 Profile 資料夾 (userDataDir)`);
+    await fs.mkdir(PROFILE_DIRS[role], { recursive: true });
   } catch (err) {
-    log.error('browser', `刪除或重建 Profile 資料夾失敗: ${err.message}`);
+    log.error('browser', `[${role.toUpperCase()}] 刪除或重建 Profile 資料夾失敗: ${err.message}`);
   }
 
   // 重新抽籤決定新的 Viewport 與生命週期
-  currentViewport = getRandomViewport();
-  profileLifetimeMs = getRandomLifetime();
-  profileCreatedAt = Date.now();
+  currentViewports[role] = getRandomViewport();
+  profileLifetimeMs[role] = getRandomLifetime();
+  profileCreatedAt[role] = Date.now();
   
-  log.info('browser', `已抽籤新 Viewport: ${currentViewport.width}x${currentViewport.height}`);
-  log.info('browser', `已排定下一次失憶時間: ${Math.round(profileLifetimeMs / 3600000)} 小時後`);
+  log.info('browser', `[${role.toUpperCase()}] 已抽籤新 Viewport: ${currentViewports[role].width}x${currentViewports[role].height}`);
+  log.info('browser', `[${role.toUpperCase()}] 已排定下一次失憶時間: ${Math.round(profileLifetimeMs[role] / 3600000)} 小時後`);
 }
 
 /**
@@ -146,33 +167,86 @@ async function triggerAmnesia() {
  * 在擷取資料前呼叫，讓請求看起來更自然。
  */
 async function simulateHumanBehavior(page) {
-  // 隨機等待 0.5~2 秒
-  await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 1500)));
+  // 隨機等待 0.5~1 秒
+  await new Promise((r) => setTimeout(r, 500 + Math.floor(Math.random() * 500)));
 
-  // 隨機滾動 1~3 次
-  const scrolls = 1 + Math.floor(Math.random() * 3);
+  // 隨機滾動 3~5 次
+  const scrolls = 3 + Math.floor(Math.random() * 2);
   for (let i = 0; i < scrolls; i++) {
-    const distance = 100 + Math.floor(Math.random() * 400);
+    const distance = 200 + Math.floor(Math.random() * 300);
     await page.evaluate((d) => window.scrollBy(0, d), distance);
-    await new Promise((r) => setTimeout(r, 200 + Math.floor(Math.random() * 500)));
+    await new Promise((r) => setTimeout(r, 200 + Math.floor(Math.random() * 200)));
   }
 
   // 滾回頂部（確保能擷取到完整列表）
   await page.evaluate(() => window.scrollTo(0, 0));
-  await new Promise((r) => setTimeout(r, 300 + Math.floor(Math.random() * 400)));
+  await new Promise((r) => setTimeout(r, 200 + Math.floor(Math.random() * 400)));
 }
 
-async function withPage(fn) {
-  const browser = await getBrowser();
+async function withPage(optionsOrFn, fnIfOptions) {
+  let role = 'scout';
+  let keepAlive = false;
+  let fn = null;
+
+  if (typeof optionsOrFn === 'function') {
+    fn = optionsOrFn;
+  } else {
+    role = optionsOrFn.role || 'scout';
+    keepAlive = optionsOrFn.keepAlive || false;
+    fn = fnIfOptions;
+  }
+
+  const browser = await getBrowser(role);
   const page = await browser.newPage();
+  if (keepAlive) {
+    page.keepAlive = true;
+  }
+  
+  // 透過底層注入 MutationObserver，自動且確實地點擊 Cookie 接受按鈕
+  await page.evaluateOnNewDocument(() => {
+    window.addEventListener('DOMContentLoaded', () => {
+      const tryClickAccept = () => {
+        const btn = document.querySelector('#onetrust-accept-btn-handler');
+        // offsetParent !== null 代表元素在畫面上是可見的
+        if (btn && btn.offsetParent !== null) {
+          btn.click();
+          return true;
+        }
+        return false;
+      };
+
+      // 載入完畢先嘗試點一次
+      if (tryClickAccept()) return;
+
+      // 如果還沒出來，就掛上監視器，只要 DOM 有變動就檢查
+      const observer = new MutationObserver((mutations, obs) => {
+        if (tryClickAccept()) {
+          // 點到之後就可以把監視器關掉了，節省效能
+          // （因為每次換頁都會重新觸發 evaluateOnNewDocument 掛上新的 observer）
+          obs.disconnect();
+        }
+      });
+
+      if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true });
+      } else {
+        observer.observe(document.documentElement, { childList: true, subtree: true });
+      }
+    });
+  });
+
   try {
-    await page.setViewport(currentViewport);
+    await page.setViewport(currentViewports[role]);
 
     const result = await fn(page);
 
     return result;
   } finally {
-    await page.close().catch(() => {});
+    if (!page.keepAlive) {
+      await page.close().catch(() => {});
+    } else {
+      log.info('browser', `[${role.toUpperCase()}] 分頁進入 Keep-Alive 模式，脫離 withPage 生命週期管理`);
+    }
   }
 }
 

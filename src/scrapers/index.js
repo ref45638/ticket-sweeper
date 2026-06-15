@@ -26,7 +26,7 @@ async function scrapeSite(site) {
   if (!scraper) {
     throw new Error(`No scraper found for URL: ${site.url}`);
   }
-  const result = await scraper.scrape(site.url);
+  const result = await scraper.scrape(site.url, site);
   return result;
 }
 
