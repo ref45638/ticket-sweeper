@@ -61,10 +61,7 @@ function scheduleNextTick() {
 
   const hour = new Date().getHours();
   const isQuiet = hour >= QUIET_HOUR_START && hour < QUIET_HOUR_END;
-  log.info(
-    'scheduler',
-    `下次輪詢 ${next.toLocaleString('zh-TW', { hour12: false })}（${Math.ceil(delayMs / 1000)} 秒後）${isQuiet ? '（降頻模式 03~09）' : ''}`
-  );
+  log.info('scheduler', `下次輪詢 ${next.toLocaleString('zh-TW', { hour12: false })}（${Math.ceil(delayMs / 1000)} 秒後）${isQuiet ? '（降頻模式 03~09）' : ''}`);
 
   timeoutId = setTimeout(() => {
     timeoutId = null;
@@ -95,10 +92,7 @@ async function scrapeOneSite(site) {
     });
 
     const { availableCount } = result.summary;
-    log.info(
-      'scraper',
-      `完成: ${site.label} (${((Date.now() - started) / 1000).toFixed(1)}s) — 可購 ${availableCount} 區`
-    );
+    log.info('scraper', `完成: ${site.label} (${((Date.now() - started) / 1000).toFixed(1)}s) — 可購 ${availableCount} 區`);
 
     const notifyOutcomes = await notifier.notifyForSiteResult(site, result);
     const notified = notifyOutcomes.some((o) => o.notified);
@@ -108,18 +102,21 @@ async function scrapeOneSite(site) {
 
     // 加車流程結果通知
     if (result.cartResult) {
+      state.recordStat('cartTotal');
       const globalSettings = await settings.getSettings();
       const notifyEvents = globalSettings.notifyEvents || {};
-      
+
       let cartMsg = '';
       let shouldNotify = false;
 
       if (result.cartResult.needManualCaptcha) {
+        state.recordStat('captchaEvents');
         if (notifyEvents.cartManualCaptcha !== false) {
           shouldNotify = true;
           cartMsg = `🚨 搶票中！已為您填好票數與條款\n\n活動：${site.label}\n\n⚠️ 需要手動填寫驗證碼！\n請立即切換到瀏覽器視窗完成操作！\n\n⏰ 鎖票保留約 10 分鐘`;
         }
       } else if (result.cartResult.success) {
+        state.recordStat('cartSuccess');
         if (notifyEvents.cartSuccess !== false) {
           shouldNotify = true;
           cartMsg = `🎉 發現有票，準備搶票！\n\n活動：${site.label}\n${result.cartResult.message}\n\n${site.url}`;
@@ -210,12 +207,15 @@ async function runScrapeCycle() {
     state.setSchedulerMeta({ running: false });
     const elapsed = ((Date.now() - startedAt.getTime()) / 1000).toFixed(1);
     const ok = outcomes.filter((o) => o.ok).length;
+
+    state.recordStat('scrapesTotal', outcomes.length);
+    state.recordStat('scrapesSuccess', ok);
+    state.recordStat('scrapesError', outcomes.length - ok);
+
     log.info('scheduler', `輪詢週期結束 (${elapsed}s) — 成功 ${ok}/${outcomes.length}`);
 
     // 檢查是否有被 WAF 阻擋的情況
-    const blocked = outcomes.some(
-      (o) => !o.ok && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error)
-    );
+    const blocked = outcomes.some((o) => !o.ok && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error));
 
     if (blocked) {
       consecutiveBlocks++;
@@ -241,10 +241,7 @@ function startScheduler() {
   if (timeoutId) return;
 
   const stepMin = config.scrapeIntervalMs / 60_000;
-  log.info(
-    'scheduler',
-    `排程啟動（隨機 jitter），基礎間隔 ${stepMin >= 1 && Number.isInteger(stepMin) ? `${stepMin} 分鐘` : `${config.scrapeIntervalMs / 1000} 秒`}，凌晨 03~09 降頻 5 分鐘`
-  );
+  log.info('scheduler', `排程啟動（隨機 jitter），基礎間隔 ${stepMin >= 1 && Number.isInteger(stepMin) ? `${stepMin} 分鐘` : `${config.scrapeIntervalMs / 1000} 秒`}，凌晨 03~09 降頻 5 分鐘`);
 
   scheduleNextTick();
 }

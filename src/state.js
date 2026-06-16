@@ -54,6 +54,24 @@ function shouldNotify(siteId, sectionName, cooldownMs) {
   return getCooldownRemaining(siteId, sectionName) === 0;
 }
 
+const stats = {
+  startTime: Date.now(),
+  scrapesTotal: 0,
+  scrapesSuccess: 0,
+  scrapesError: 0,
+  cartTotal: 0,
+  cartSuccess: 0,
+  captchaEvents: 0,
+};
+
+function recordStat(key, count = 1) {
+  if (key in stats && key !== 'startTime') stats[key] += count;
+}
+
+function getStats() {
+  return { ...stats, uptimeMs: Date.now() - stats.startTime };
+}
+
 module.exports = {
   setSiteResult,
   getSiteResult,
@@ -62,4 +80,6 @@ module.exports = {
   getSchedulerMeta,
   markNotified,
   shouldNotify,
+  recordStat,
+  getStats,
 };

@@ -189,4 +189,31 @@ router.post('/ocr', async (req, res) => {
   }
 });
 
+// ===== Logs & Stats =====
+const logger = require('../logger');
+
+router.get('/stats', (_req, res) => {
+  res.json(state.getStats());
+});
+
+router.get('/logs/stream', (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache');
+  res.setHeader('Connection', 'keep-alive');
+
+  // flush existing history
+  for (const entry of logger.history()) {
+    res.write(`data: ${JSON.stringify(entry)}\n\n`);
+  }
+
+  const listener = (entry) => {
+    res.write(`data: ${JSON.stringify(entry)}\n\n`);
+  };
+  logger.emitter.on('log', listener);
+
+  req.on('close', () => {
+    logger.emitter.off('log', listener);
+  });
+});
+
 module.exports = router;

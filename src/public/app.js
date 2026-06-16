@@ -753,6 +753,73 @@ function bindOcr() {
   });
 }
 
+// ===== Logs & Stats =====
+
+function bindLogs() {
+  const container = $('#logs-container');
+  const autoscroll = $('#logs-autoscroll');
+  
+  $('#logs-clear-btn').addEventListener('click', () => {
+    container.innerHTML = '';
+  });
+
+  const evtSource = new EventSource('/api/logs/stream');
+  
+  evtSource.onmessage = (e) => {
+    try {
+      const data = JSON.parse(e.data);
+      const div = document.createElement('div');
+      div.className = 'log-entry';
+      
+      let timeStr = data.time;
+      if (data.time) {
+        const d = new Date(data.time);
+        if (!isNaN(d)) {
+          timeStr = d.toLocaleTimeString('zh-TW', { hour12: false });
+        }
+      }
+
+      div.innerHTML = `
+        <span class="log-time">[${timeStr}]</span>
+        <span class="log-level log-level--${data.level}">[${data.level}]</span>
+        <span class="log-tag">[${data.tag}]</span>
+        <span class="log-msg">${data.message}</span>
+      `;
+      container.appendChild(div);
+      
+      if (autoscroll.checked) {
+        container.scrollTop = container.scrollHeight;
+      }
+    } catch(err) {
+      // ignore parse errors
+    }
+  };
+}
+
+async function refreshStats() {
+  try {
+    const res = await fetch('/api/stats');
+    if (!res.ok) return;
+    const data = await res.json();
+    
+    // format uptime
+    const sec = Math.floor(data.uptimeMs / 1000);
+    const h = String(Math.floor(sec / 3600)).padStart(2, '0');
+    const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
+    const s = String(sec % 60).padStart(2, '0');
+    
+    $('#stat-uptime').textContent = `${h}:${m}:${s}`;
+    $('#stat-scrapes-total').textContent = data.scrapesTotal.toLocaleString();
+    $('#stat-scrapes-success').textContent = data.scrapesSuccess.toLocaleString();
+    $('#stat-scrapes-error').textContent = data.scrapesError.toLocaleString();
+    $('#stat-captcha-events').textContent = data.captchaEvents.toLocaleString();
+    $('#stat-cart-success').textContent = data.cartSuccess.toLocaleString();
+    
+  } catch (err) {
+    console.error('Failed to fetch stats', err);
+  }
+}
+
 // ===== Init =====
 
 async function init() {
@@ -763,8 +830,14 @@ async function init() {
   bindTableActions();
   bindChrome();
   bindOcr();
+  bindLogs();
+  
   await refreshAll();
+  await refreshStats();
+  
   poll.start();
+  // Poll stats every 5s along with status
+  setInterval(refreshStats, 5000);
 }
 
 init();

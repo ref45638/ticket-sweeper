@@ -1,3 +1,8 @@
+const EventEmitter = require('events');
+const logEmitter = new EventEmitter();
+const logHistory = [];
+const MAX_LOGS = 200;
+
 function timestamp() {
   return new Date().toISOString();
 }
@@ -19,7 +24,15 @@ function formatArgs(args) {
 }
 
 function log(level, tag, ...args) {
-  const line = `[${timestamp()}] [${level}] [${tag}] ${formatArgs(args)}`;
+  const msg = formatArgs(args);
+  const ts = timestamp();
+  const line = `[${ts}] [${level}] [${tag}] ${msg}`;
+
+  const entry = { time: ts, level, tag, message: msg };
+  logHistory.push(entry);
+  if (logHistory.length > MAX_LOGS) logHistory.shift();
+  logEmitter.emit('log', entry);
+
   if (level === 'ERROR') {
     console.error(line);
   } else if (level === 'WARN') {
@@ -33,4 +46,6 @@ module.exports = {
   info: (tag, ...args) => log('INFO', tag, ...args),
   warn: (tag, ...args) => log('WARN', tag, ...args),
   error: (tag, ...args) => log('ERROR', tag, ...args),
+  emitter: logEmitter,
+  history: () => logHistory,
 };
