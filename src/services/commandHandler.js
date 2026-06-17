@@ -93,7 +93,10 @@ async function processCommand(text) {
       return (
         '⚙️ 設定指令教學：\n\n' +
         '- /set TIXUISID [值]：設定拓元登入的 Session ID\n' +
-        '  (例如: /set TIXUISID odkqwodkwqod)'
+        '  (例如: /set TIXUISID odkqwodkwqod)\n\n' +
+        '- /set 離座模式 [on/off]：離座(無人值守)模式\n' +
+        '  開啟後，驗證碼自動辨識失敗就直接放棄、交回 Scout 繼續輪詢，\n' +
+        '  不會保留瀏覽器等你手動填寫。(別名: /set unattended on)'
       );
     }
 
@@ -104,6 +107,24 @@ async function processCommand(text) {
       try {
         await settingsStore.patchSettings({ tixuisid: value });
         return `✅ 成功設定 TIXUISID = ${value}`;
+      } catch (e) {
+        return `❌ 設定失敗：${e.message}`;
+      }
+    }
+
+    if (key === '離座模式' || key.toLowerCase() === 'unattended') {
+      const v = (value || '').toLowerCase();
+      const onWords = ['on', '開', '啟用', 'true', '1'];
+      const offWords = ['off', '關', '停用', 'false', '0'];
+      if (!onWords.includes(v) && !offWords.includes(v)) {
+        return '❌ 請指定 on 或 off，例如：/set 離座模式 on';
+      }
+      const enabled = onWords.includes(v);
+      try {
+        await settingsStore.patchSettings({ unattendedMode: enabled });
+        return enabled
+          ? '🚪 已開啟「離座模式」：驗證碼辨識失敗將直接放棄並交回 Scout 繼續輪詢。'
+          : '🪑 已關閉「離座模式」：驗證碼辨識失敗會保留瀏覽器 30 秒等待手動填寫。';
       } catch (e) {
         return `❌ 設定失敗：${e.message}`;
       }

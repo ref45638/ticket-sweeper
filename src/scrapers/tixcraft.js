@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { withPage, simulateHumanBehavior } = require('./browser');
+const { withPage, simulateHumanBehavior, resetBrowser } = require('./browser');
 const log = require('../logger');
 const notifier = require('../notifier');
 const settings = require('../config/settings');
@@ -38,9 +38,7 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
         log.info('tixcraft', `[${siteId}] 🎉 成功加入購物車！`);
         await sitesStore.updateSite(siteId, { enabled: false });
 
-        notifier.sendDirect(
-          `🎉 [${site.label || '拓元演唱會'}] \n已成功加入購物車！\n\n⏰ 請在 10 分鐘內完成結帳！🔗 結帳連結：https://tixcraft.com/ticket/checkout`
-        );
+        notifier.sendDirect(`🎉 [${site.label || '拓元演唱會'}] \n已成功加入購物車！\n\n⏰ 請在 10 分鐘內完成結帳！🔗 結帳連結：https://tixcraft.com/ticket/checkout`);
 
         // wait random ~3 seconds before closing
         const waitTime = 2000 + Math.random() * 2000;
@@ -155,6 +153,10 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
     // Also remove the injected cookie to be safe
     await removeCookie(page, domain).catch(() => {});
     await page.close().catch(() => {});
+    // 沒有其他殺手任務在進行時，直接關閉整個 killer 瀏覽器，而非只關分頁
+    if (activeCartTasks.size === 0) {
+      await resetBrowser('killer').catch(() => {});
+    }
   }
 }
 
@@ -253,6 +255,152 @@ async function removeCookie(page, domain) {
 }
 
 /**
+ * 選擇票數並勾選同意條款（頁面重整後表單會重置，故抽成可重複呼叫）。
+ */
+async function fillQuantityAndAgree(page, desiredQty) {
+  await page.waitForSelector('select.mobile-select, select[name*="quantity"], select#TicketForm_ticketPrice, #ticket-price-tbl', { timeout: 10_000 }).catch(() => {});
+
+  const quantitySet = await page.evaluate((desired) => {
+    const selectors = ['select.mobile-select', 'select[name*="quantity"]', 'select#TicketForm_ticketPrice', '.select-container select'];
+    for (const sel of selectors) {
+      const select = document.querySelector(sel);
+      if (select && select.options.length > 1) {
+        const validOptions = Array.from(select.options)
+          .filter((opt) => parseInt(opt.value, 10) > 0)
+          .map((opt) => ({ value: opt.value, num: parseInt(opt.value, 10) }));
+
+        if (validOptions.length === 0) {
+          select.value = select.options[1].value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return { found: true, value: select.options[1].value, fallback: true };
+        }
+
+        const exact = validOptions.find((o) => o.num === desired);
+        if (exact) {
+          select.value = exact.value;
+          select.dispatchEvent(new Event('change', { bubbles: true }));
+          return { found: true, value: exact.value, desired, actual: exact.num };
+        }
+
+        const best = validOptions.filter((o) => o.num <= desired).sort((a, b) => b.num - a.num)[0] || validOptions.sort((a, b) => b.num - a.num)[0];
+        select.value = best.value;
+        select.dispatchEvent(new Event('change', { bubbles: true }));
+        return { found: true, value: best.value, desired, actual: best.num, adjusted: true };
+      }
+    }
+    return { found: false };
+  }, desiredQty);
+
+  if (quantitySet.found) {
+    if (quantitySet.adjusted) {
+      log.warn('tixcraft', `想要 ${quantitySet.desired} 張，但只剩 ${quantitySet.actual} 張可選，先買再說！`);
+    } else {
+      log.info('tixcraft', `已選擇票數: ${quantitySet.value}`);
+    }
+  } else {
+    log.warn('tixcraft', '未找到票數選擇器，可能頁面結構不同');
+  }
+
+  const agreedChecked = await page.evaluate(() => {
+    const selectors = ['#TicketForm_agree', 'input[name*="agree"]', 'input[type="checkbox"]'];
+    for (const sel of selectors) {
+      const cb = document.querySelector(sel);
+      if (cb && !cb.checked) {
+        cb.checked = true;
+        cb.dispatchEvent(new Event('change', { bubbles: true }));
+        cb.dispatchEvent(new Event('click', { bubbles: true }));
+        return true;
+      }
+      if (cb && cb.checked) return true;
+    }
+    return false;
+  });
+
+  if (agreedChecked) {
+    log.info('tixcraft', '已勾選同意條款');
+  } else {
+    log.warn('tixcraft', '未找到同意條款 checkbox');
+  }
+}
+
+/**
+ * 點擊送出按鈕，回傳是否有按到。
+ */
+async function clickSubmit(page) {
+  return page.evaluate(() => {
+    const btn = document.querySelector('button[type="submit"], input[type="submit"], .btn-primary, #submitBtn');
+    if (btn) {
+      btn.click();
+      return true;
+    }
+    return false;
+  });
+}
+
+/**
+ * 截取驗證碼圖片並呼叫 OCR，成功回傳辨識文字，失敗回傳 null（不拋錯）。
+ */
+async function recognizeCaptcha(page, imgSelector) {
+  try {
+    // 等驗證碼圖片真的渲染完成（有寬高）才截圖，否則 screenshot 會報 Node has 0 width
+    await page.waitForSelector(imgSelector, { visible: true, timeout: 5000 });
+    await page.waitForFunction(
+      (sel) => {
+        const img = document.querySelector(sel);
+        return !!img && img.complete && img.naturalWidth > 0 && img.getBoundingClientRect().width > 0;
+      },
+      { timeout: 5000 },
+      imgSelector
+    );
+    const captchaImg = await page.$(imgSelector);
+    if (!captchaImg) return null;
+
+    const base64Data = await captchaImg.screenshot({ encoding: 'base64' });
+    log.info('tixcraft', '⏳ 正在呼叫 OCR API 解析驗證碼...');
+    const response = await fetch('http://127.0.0.1:8000/ocr/base64', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ image_base64: base64Data }),
+    });
+    const result = await response.json();
+    if (result.success && result.text) {
+      log.info('tixcraft', `✅ 驗證碼解析成功: [${result.text}]`);
+      return result.text;
+    }
+    log.warn('tixcraft', `❌ 驗證碼解析失敗: ${result.error || '未知錯誤'}`);
+    return null;
+  } catch (err) {
+    log.error('tixcraft', `❌ 自動驗證碼處理發生錯誤: ${err.message}`);
+    return null;
+  }
+}
+
+/**
+ * 2b 人工處理視窗：保留瀏覽器最多 30 秒讓使用者手動填驗證碼。
+ * 期間若使用者送出成功（離開 ticket 頁），交給背景排隊監控；逾時則自動關閉 Killer 並交回 Scout。
+ */
+async function watchManualCaptcha(page, site, domain) {
+  const MANUAL_WINDOW_MS = 30_000;
+  try {
+    await page.waitForFunction(() => !location.href.includes('/ticket/ticket'), { timeout: MANUAL_WINDOW_MS, polling: 1000 });
+    log.info('tixcraft', `[${site.id}] 偵測到手動送出，移交背景排隊監控`);
+    monitorQueueAndRetry(page, site, '', site.tixuisid).catch((err) => {
+      log.error('tixcraft', `背景排隊監控發生未預期錯誤: ${err.message}`);
+    });
+    return; // 後續清理交給 monitorQueueAndRetry
+  } catch {
+    log.warn('tixcraft', `[${site.id}] 手動處理逾時 30 秒，自動關閉 Killer 並交回 Scout 重新輪詢`);
+  }
+
+  await removeCookie(page, domain).catch(() => {});
+  activeCartTasks.delete(site.id);
+  await page.close().catch(() => {});
+  if (activeCartTasks.size === 0) {
+    await resetBrowser('killer').catch(() => {});
+  }
+}
+
+/**
  * 嘗試自動加車流程。
  * 回傳 { success, message }
  */
@@ -265,7 +413,7 @@ async function attemptAddToCart(site) {
   const domain = extractCookieDomain(site.url);
 
   // 用 killer 角色開啟分頁
-  return await withPage({ role: 'killer', keepAlive: true }, async (killerPage) => {
+  return await withPage({ role: 'killer' }, async (killerPage) => {
     // 自動處理所有 alert / confirm / prompt 彈窗
     killerPage.on('dialog', async (dialog) => {
       log.info('tixcraft', `[Killer] 偵測到彈窗 [${dialog.type()}]: ${dialog.message()}`);
@@ -276,16 +424,20 @@ async function attemptAddToCart(site) {
       // Step 1: 注入 TIXUISID Cookie
       await injectCookie(killerPage, site.tixuisid, domain);
 
-      // Step 2: 前往活動頁面並實作「極速重試 (Aggressive Reload)」
+      // Step 2: 前往活動頁面並實作「遞增式重試 (Backoff Reload)」
+      // 一開始用很短的逾時快速重整，卡住才逐次 ×2 拉長，避免瘋狂重整也避免一開始等太久
       let areaLoaded = false;
       const MAX_RETRIES = 5;
+      const BASE_TIMEOUT = 2500; // 第一次 2.5s，之後 5s / 10s / 20s / 20s(封頂)
+      const MAX_TIMEOUT = 20000;
 
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        log.info('tixcraft', `[Killer] 前往活動頁面準備判斷區域 (嘗試 ${attempt}/${MAX_RETRIES}): ${site.url}`);
+        const gotoTimeout = Math.min(BASE_TIMEOUT * 2 ** (attempt - 1), MAX_TIMEOUT);
+        const selectorTimeout = Math.round(gotoTimeout * 0.6);
+        log.info('tixcraft', `[Killer] 前往活動頁面準備判斷區域 (嘗試 ${attempt}/${MAX_RETRIES}, 逾時 ${gotoTimeout}ms): ${site.url}`);
         try {
-          // 只要 3 秒沒載入基礎 DOM，或多等 1.5 秒票區沒出來，就視為卡住重整
-          await killerPage.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 3000 });
-          await killerPage.waitForSelector('ul.area-list li, .area-list li, ul li', { timeout: 1500 });
+          await killerPage.goto(site.url, { waitUntil: 'domcontentloaded', timeout: gotoTimeout });
+          await killerPage.waitForSelector('ul.area-list li, .area-list li, ul li', { timeout: selectorTimeout });
           areaLoaded = true;
           break; // 成功就脫離迴圈
         } catch (err) {
@@ -301,14 +453,14 @@ async function attemptAddToCart(site) {
       const clickedAreaInfo = await killerPage.evaluate(() => {
         const NAV_BLOCKLIST = /^(Events|My Tickets|Sign In|Menu|Home|Clear|Search)/i;
         const listRoots = document.querySelectorAll('ul.area-list, .zone.area-list');
-        const lis =
-          listRoots.length > 0
-            ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')])
-            : [...document.querySelectorAll('li')];
+        const lis = listRoots.length > 0 ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')]) : [...document.querySelectorAll('li')];
 
-        const availableLinks = [];
+        // 清除上一輪可能殘留的標記，避免選擇器抓到舊節點
+        document.querySelectorAll('a[data-killer-target]').forEach((a) => a.removeAttribute('data-killer-target'));
 
-        for (const [index, li] of lis.entries()) {
+        const availableAnchors = [];
+
+        for (const li of lis) {
           const anchor = li.querySelector('a');
           const font = li.querySelector('font');
           const text = (li.textContent || '').replace(/\s+/g, ' ').trim();
@@ -332,32 +484,28 @@ async function attemptAddToCart(site) {
           const graySoldOut = fontColor === '#AAAAAA' && explicitlySoldOut;
 
           const soldOut = explicitlySoldOut || graySoldOut || (!anchor && !isSelectable);
-          const available =
-            !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
+          const available = !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
 
-          if (available) {
-            let name = text
+          if (available && anchor) {
+            const name = text
               .replace(/剩餘\s*\d+/g, '')
               .replace(/\d+\s*seat\(s\)\s*remaining/gi, '')
               .replace(/熱賣中|熱銷中/gi, '')
               .replace(/已售完/gi, '')
               .replace(/Sold\s*out/gi, '')
               .trim();
-            // 在元素上標記一個屬性方便我們從外面抓取
-            if (anchor) {
-              anchor.setAttribute('data-killer-target', 'true');
-              availableLinks.push({ index, name, selector: `li:nth-child(${index + 1}) a[data-killer-target="true"]` });
-            }
+            availableAnchors.push({ name, anchor });
           }
         }
 
-        if (availableLinks.length === 0) {
+        if (availableAnchors.length === 0) {
           return null;
         }
 
-        // 隨機選擇一個
-        const randomIndex = Math.floor(Math.random() * availableLinks.length);
-        return availableLinks[randomIndex];
+        // 隨機選一個，並只在被選中的那個 anchor 上做唯一標記
+        const chosen = availableAnchors[Math.floor(Math.random() * availableAnchors.length)];
+        chosen.anchor.setAttribute('data-killer-target', 'true');
+        return { name: chosen.name };
       });
 
       if (!clickedAreaInfo) {
@@ -367,13 +515,10 @@ async function attemptAddToCart(site) {
       log.info('tixcraft', `[Killer] 隨機選擇區域: ${clickedAreaInfo.name}`);
 
       try {
-        // 點擊後只等 3.5 秒，卡住就直接拋錯中斷
-        await Promise.all([
-          killerPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 3500 }),
-          killerPage.click(clickedAreaInfo.selector),
-        ]);
+        // 點擊被標記的區域連結並等待跳轉，逾時才視為卡住中斷
+        await Promise.all([killerPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }), killerPage.click('a[data-killer-target="true"]')]);
       } catch (err) {
-        log.warn('tixcraft', `[Killer] 點擊區域後卡住超過 3.5 秒，放棄並交回給 Scout 重新發起`);
+        log.warn('tixcraft', `[Killer] 點擊區域或跳轉失敗，放棄並交回給 Scout 重新發起: ${err.message}`);
         return { success: false, message: '點擊區域後跳轉卡住，放棄本次任務' };
       }
 
@@ -386,196 +531,45 @@ async function attemptAddToCart(site) {
         };
       }
 
-      // Step 4: 等待票數選擇表單出現
-      try {
-        await killerPage.waitForSelector(
-          'select.mobile-select, select[name*="quantity"], select#TicketForm_ticketPrice, #ticket-price-tbl',
-          { timeout: 10_000 }
-        );
-      } catch {
-        // 可能頁面結構不同，繼續嘗試
-        log.warn('tixcraft', '[Killer] 等待票數選擇器逾時，嘗試繼續...');
-      }
-
-      // Step 5: 選擇票數（從全域設定讀取，若不夠則選最大可用數量）
-      const desiredQty = site.ticketQuantity || 1;
-      const quantitySet = await killerPage.evaluate((desired) => {
-        const selectors = [
-          'select.mobile-select',
-          'select[name*="quantity"]',
-          'select#TicketForm_ticketPrice',
-          '.select-container select',
-        ];
-        for (const sel of selectors) {
-          const select = document.querySelector(sel);
-          if (select && select.options.length > 1) {
-            // 收集所有可用的數量選項（排除 0 或空值）
-            const validOptions = Array.from(select.options)
-              .filter((opt) => parseInt(opt.value, 10) > 0)
-              .map((opt) => ({ value: opt.value, num: parseInt(opt.value, 10) }));
-
-            if (validOptions.length === 0) {
-              // fallback: 直接選第二個選項
-              select.value = select.options[1].value;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-              return {
-                found: true,
-                value: select.options[1].value,
-                fallback: true,
-              };
-            }
-
-            // 優先選想要的數量
-            const exact = validOptions.find((o) => o.num === desired);
-            if (exact) {
-              select.value = exact.value;
-              select.dispatchEvent(new Event('change', { bubbles: true }));
-              return {
-                found: true,
-                value: exact.value,
-                desired,
-                actual: exact.num,
-              };
-            }
-
-            // 想要的數量不夠，選最接近但不超過的最大值（先買再說）
-            const best =
-              validOptions.filter((o) => o.num <= desired).sort((a, b) => b.num - a.num)[0] ||
-              validOptions.sort((a, b) => b.num - a.num)[0]; // 如果都大於 desired，選最大的
-
-            select.value = best.value;
-            select.dispatchEvent(new Event('change', { bubbles: true }));
-            return {
-              found: true,
-              value: best.value,
-              desired,
-              actual: best.num,
-              adjusted: true,
-            };
-          }
-        }
-        return { found: false };
-      }, desiredQty);
-
-      if (quantitySet.found) {
-        if (quantitySet.adjusted) {
-          log.warn('tixcraft', `想要 ${quantitySet.desired} 張，但只剩 ${quantitySet.actual} 張可選，先買再說！`);
-        } else {
-          log.info('tixcraft', `已選擇票數: ${quantitySet.value}`);
-        }
-      } else {
-        log.warn('tixcraft', '未找到票數選擇器，可能頁面結構不同');
-      }
-
-      // Step 6: 勾選同意條款
-      const agreedChecked = await killerPage.evaluate(() => {
-        const selectors = ['#TicketForm_agree', 'input[name*="agree"]', 'input[type="checkbox"]'];
-        for (const sel of selectors) {
-          const cb = document.querySelector(sel);
-          if (cb && !cb.checked) {
-            cb.checked = true;
-            cb.dispatchEvent(new Event('change', { bubbles: true }));
-            cb.dispatchEvent(new Event('click', { bubbles: true }));
-            return true;
-          }
-          if (cb && cb.checked) return true;
-        }
-        return false;
-      });
-
-      if (agreedChecked) {
-        log.info('tixcraft', '已勾選同意條款');
-      } else {
-        log.warn('tixcraft', '未找到同意條款 checkbox');
-      }
-
-      // Step 7: 驗證碼處理 — 目前採全自動模式
+      // Step 4~7: 全自動填單與驗證碼辨識，最多重試 5 次（每次失敗就重整頁面換新驗證碼）
       const captchaInputSelector = '#TicketForm_verifyCode, input[name*="verify"], input[name*="captcha"]';
       const captchaImgSelector = '#TicketForm_imageRandom, img[src*="captcha"], img[id*="captcha"]';
-
-      const hasCaptcha = await killerPage.evaluate((sel) => {
-        const input = document.querySelector(sel);
-        return !!input;
-      }, captchaInputSelector);
+      const desiredQty = site.ticketQuantity || 1;
+      const MAX_CAPTCHA_ATTEMPTS = 5;
 
       let submitted = false;
 
-      if (hasCaptcha) {
-        log.info('tixcraft', '🔍 偵測到驗證碼輸入框，開始自動辨識...');
-        try {
-          // 等待驗證碼圖片出現
-          await killerPage.waitForSelector(captchaImgSelector, { timeout: 3000 });
-          const captchaImg = await killerPage.$(captchaImgSelector);
+      for (let cAttempt = 1; cAttempt <= MAX_CAPTCHA_ATTEMPTS; cAttempt++) {
+        // 重整後表單會重置，每次都重新選票數＋勾同意
+        await fillQuantityAndAgree(killerPage, desiredQty);
 
-          if (captchaImg) {
-            // 截取驗證碼圖片轉 Base64
-            const base64Data = await captchaImg.screenshot({ encoding: 'base64' });
+        const hasCaptcha = await killerPage.evaluate((sel) => !!document.querySelector(sel), captchaInputSelector);
 
-            log.info('tixcraft', '⏳ 正在呼叫 OCR API 解析驗證碼...');
-
-            // 呼叫本地端的 Python OCR 微服務
-            const response = await fetch('http://127.0.0.1:8000/ocr/base64', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-              },
-              body: JSON.stringify({ image_base64: base64Data }),
-            });
-
-            const result = await response.json();
-
-            if (result.success && result.text) {
-              log.info('tixcraft', `✅ 驗證碼解析成功: [${result.text}]`);
-
-              // 將驗證碼填入輸入框 (移除 delay 追求極致速度)
-              await killerPage.type(captchaInputSelector, result.text, { delay: 20 });
-
-              // 自動按 submit
-              submitted = await killerPage.evaluate(() => {
-                const btn = document.querySelector(
-                  'button[type="submit"], input[type="submit"], .btn-primary, #submitBtn'
-                );
-                if (btn) {
-                  btn.click();
-                  return true;
-                }
-                return false;
-              });
-
-              if (submitted) {
-                log.info('tixcraft', '🚀 已自動送出驗證碼！');
-              } else {
-                log.warn('tixcraft', '⚠️ 驗證碼填寫完畢，但未找到送出按鈕！');
-              }
-            } else {
-              log.warn('tixcraft', `❌ 驗證碼解析失敗: ${result.error || '未知錯誤'}，請手動介入！`);
-              return {
-                success: true,
-                message: '驗證碼自動解析失敗，請切換至瀏覽器手動填寫！',
-                needManualCaptcha: true,
-              };
-            }
-          }
-        } catch (err) {
-          log.error('tixcraft', `❌ 自動驗證碼處理發生錯誤: ${err.message}`);
-          return {
-            success: true,
-            message: '驗證碼處理過程發生錯誤，請切換至瀏覽器手動填寫！',
-            needManualCaptcha: true,
-          };
+        if (!hasCaptcha) {
+          submitted = await clickSubmit(killerPage);
+          if (submitted) log.info('tixcraft', '🚀 未偵測到驗證碼，已自動按 Submit！');
+          break;
         }
-      } else {
-        // 沒有驗證碼的情況（罕見），自動按 submit
-        submitted = await killerPage.evaluate(() => {
-          const btn = document.querySelector('button[type="submit"], input[type="submit"], .btn-primary, #submitBtn');
-          if (btn) {
-            btn.click();
-            return true;
+
+        log.info('tixcraft', `🔍 偵測到驗證碼，開始自動辨識 (第 ${cAttempt}/${MAX_CAPTCHA_ATTEMPTS} 次)...`);
+        const captchaText = await recognizeCaptcha(killerPage, captchaImgSelector);
+
+        if (captchaText) {
+          await killerPage.type(captchaInputSelector, captchaText, { delay: 20 });
+          submitted = await clickSubmit(killerPage);
+          if (submitted) {
+            log.info('tixcraft', '🚀 已自動送出驗證碼！');
+          } else {
+            log.warn('tixcraft', '⚠️ 驗證碼填寫完畢，但未找到送出按鈕！');
           }
-          return false;
-        });
-        if (submitted) {
-          log.info('tixcraft', '🚀 未偵測到驗證碼，已自動按 Submit！');
+          break; // 有送出（或找不到按鈕）就交給後續流程
+        }
+
+        // 這次辨識失敗：還有次數就重整頁面換新驗證碼再試
+        if (cAttempt < MAX_CAPTCHA_ATTEMPTS) {
+          log.warn('tixcraft', `[Killer] 驗證碼辨識失敗，重整頁面換新驗證碼後重試 (${cAttempt}/${MAX_CAPTCHA_ATTEMPTS})...`);
+          await killerPage.reload({ waitUntil: 'domcontentloaded', timeout: 15000 }).catch(() => {});
+          await killerPage.waitForSelector(captchaInputSelector, { timeout: 5000 }).catch(() => {});
         }
       }
 
@@ -586,19 +580,38 @@ async function attemptAddToCart(site) {
         killerPage.keepAlive = true;
 
         // 啟動背景任務 (fire and forget)
-        monitorQueueAndRetry(killerPage, site, clickedAreaName, site.tixuisid).catch((err) => {
+        monitorQueueAndRetry(killerPage, site, clickedAreaInfo.name, site.tixuisid).catch((err) => {
           log.error('tixcraft', `背景排隊監控發生未預期錯誤: ${err.message}`);
         });
 
         return { success: true, message: '已移交背景排隊與重試監控，主輪詢將繼續' };
       }
 
-      return { success: true, message: '已填好票數與條款，但未找到 submit 按鈕' };
+      // 自動辨識連續 5 次都失敗
+      const globalSettings = await settings.getSettings();
+      if (globalSettings.unattendedMode) {
+        // 離座模式：不等人工，直接放棄交回 Scout（finally 會關閉 Killer 並解鎖）
+        log.warn('tixcraft', '🚪 離座模式：驗證碼自動辨識多次失敗，放棄本次並交回 Scout 重新輪詢');
+        notifier.sendDirect(`🚪 [${site.label || '拓元演唱會'}] 離座模式：驗證碼辨識失敗，已自動放棄，將由 Scout 繼續輪詢。`);
+        return { success: false, message: '離座模式：驗證碼辨識失敗，已交回 Scout' };
+      }
+
+      // 一般模式：保留瀏覽器 30 秒給人工填寫，逾時自動關閉並交回 Scout
+      killerPage.keepAlive = true;
+      notifier.sendDirect(`✋ [${site.label || '拓元演唱會'}] 驗證碼自動辨識失敗，已保留瀏覽器 30 秒，請盡快手動填寫並送出！`);
+      watchManualCaptcha(killerPage, site, domain).catch((err) => {
+        log.error('tixcraft', `手動驗證碼監控發生未預期錯誤: ${err.message}`);
+      });
+      return { success: true, message: '驗證碼自動辨識失敗，已保留瀏覽器 30 秒等待手動處理', needManualCaptcha: true };
     } finally {
       // 如果沒有開啟 keepAlive（例如沒找到 submit 或是出錯），才清除 Cookie
       if (!killerPage.keepAlive) {
         await removeCookie(killerPage, domain);
         activeCartTasks.delete(site.id); // 沒有移交背景時才在這裡解鎖
+        // 沒有其他殺手任務（含背景排隊）在進行時，直接關閉整個 killer 瀏覽器，而非只關分頁
+        if (activeCartTasks.size === 0) {
+          await resetBrowser('killer').catch(() => {});
+        }
       }
     }
   });
@@ -641,10 +654,7 @@ async function scrapeTixcraft(url, site = {}) {
       const NAV_BLOCKLIST = /^(Events|My Tickets|Sign In|Menu|Home|Clear|Search)/i;
 
       const listRoots = document.querySelectorAll('ul.area-list, .zone.area-list');
-      const lis =
-        listRoots.length > 0
-          ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')])
-          : [...document.querySelectorAll('li')];
+      const lis = listRoots.length > 0 ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')]) : [...document.querySelectorAll('li')];
 
       for (const li of lis) {
         const anchor = li.querySelector('a');
@@ -669,8 +679,7 @@ async function scrapeTixcraft(url, site = {}) {
 
         const soldOut = explicitlySoldOut || graySoldOut || (!anchor && !isSelectable);
 
-        const available =
-          !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
+        const available = !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
 
         let name = text
           .replace(/剩餘\s*\d+/g, '')
@@ -718,10 +727,7 @@ async function scrapeTixcraft(url, site = {}) {
         log.info('tixcraft', `[Scout] Killer 正在為 ${site.label} 搶票中，略過本次重複加車...`);
         cartResult = null; // 不產生重複的加車結果
       } else {
-        log.info(
-          'tixcraft',
-          `🎯 偵測到有票，將交由殺手 (Killer) 開啟網頁進行判斷與隨機選區（目標 ${ticketQuantity} 張）...`
-        );
+        log.info('tixcraft', `🎯 偵測到有票，將交由殺手 (Killer) 開啟網頁進行判斷與隨機選區（目標 ${ticketQuantity} 張）...`);
         // 使用獨立的 attemptAddToCart 處理（不鎖死當前的探子 Page）
         attemptAddToCart({ ...site, tixuisid, ticketQuantity })
           .then((res) => {

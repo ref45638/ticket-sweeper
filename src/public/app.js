@@ -62,6 +62,16 @@ const api = {
     if (!res.ok) throw new Error(data.error || data.error || 'Scrape failed');
     return data;
   },
+  async toggleBrowserVisibility(visible) {
+    const res = await fetch('/api/browser/visibility', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ visible })
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || 'Failed to toggle visibility');
+    return data;
+  },
   async ocrHealth() {
     const res = await fetch('/api/ocr/health');
     return res.json();
@@ -227,6 +237,13 @@ const render = {
     if (notifySuccess) notifySuccess.checked = notifyEvents.cartSuccess !== false;
     if (notifyFailure) notifyFailure.checked = notifyEvents.cartFailure === true;
     if (notifyError) notifyError.checked = notifyEvents.scraperError !== false;
+
+    // 同步功能設定
+    const fetchCaptchaImageToggle = $('#setting-fetchCaptchaImage');
+    if (fetchCaptchaImageToggle) fetchCaptchaImageToggle.checked = settings.fetchCaptchaImage !== false;
+
+    const unattendedModeToggle = $('#setting-unattendedMode');
+    if (unattendedModeToggle) unattendedModeToggle.checked = Boolean(settings.unattendedMode);
   },
 
   sitesTable(sites) {
@@ -507,6 +524,21 @@ function bindChrome() {
     $('#add-form').classList.add('hidden');
   });
   $('#btn-refresh-all').addEventListener('click', () => refreshAll());
+
+  const toggleBrowserBtn = $('#btn-toggle-browser');
+  if (toggleBrowserBtn) {
+    toggleBrowserBtn.addEventListener('click', async () => {
+      const isVisible = toggleBrowserBtn.dataset.visible === 'true';
+      const targetVisible = !isVisible;
+      try {
+        await api.toggleBrowserVisibility(targetVisible);
+        toggleBrowserBtn.dataset.visible = String(targetVisible);
+        toggleBrowserBtn.textContent = targetVisible ? '隱藏視窗' : '顯示視窗';
+      } catch (err) {
+        toast(err.message);
+      }
+    });
+  }
 }
 
 const poll = {
@@ -550,6 +582,32 @@ function bindNotifyToggles() {
       });
     }
   });
+
+  const fetchCaptchaImageToggle = $('#setting-fetchCaptchaImage');
+  if (fetchCaptchaImageToggle) {
+    fetchCaptchaImageToggle.addEventListener('change', async () => {
+      try {
+        await api.patchSettings({ fetchCaptchaImage: fetchCaptchaImageToggle.checked });
+        toast('功能設定已更新');
+      } catch (err) {
+        toast(err.message);
+        fetchCaptchaImageToggle.checked = !fetchCaptchaImageToggle.checked;
+      }
+    });
+  }
+
+  const unattendedModeToggle = $('#setting-unattendedMode');
+  if (unattendedModeToggle) {
+    unattendedModeToggle.addEventListener('change', async () => {
+      try {
+        await api.patchSettings({ unattendedMode: unattendedModeToggle.checked });
+        toast(unattendedModeToggle.checked ? '已開啟離座模式' : '已關閉離座模式');
+      } catch (err) {
+        toast(err.message);
+        unattendedModeToggle.checked = !unattendedModeToggle.checked;
+      }
+    });
+  }
 }
 
 // ===== OCR 驗證器 =====

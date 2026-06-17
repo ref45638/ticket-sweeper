@@ -1,11 +1,13 @@
 {
-  "tixuisid": "gmfukc859ultlafqmbocs80v90",
+  "tixuisid": "mo72bq834q4amft4hcf8f1lhnn",
   "ticketQuantity": 2,
+  "unattendedMode": true,
   "notifyEvents": {
     "ticketFound": false,
     "cartManualCaptcha": true,
     "cartSuccess": true,
     "cartFailure": false,
     "scraperError": true
-  }
+  },
+  "fetchCaptchaImage": false
 }

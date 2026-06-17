@@ -146,6 +146,8 @@ router.get('/settings', async (_req, res) => {
     hasTixuisid: Boolean(data.tixuisid),
     ticketQuantity: data.ticketQuantity || 1,
     notifyEvents: data.notifyEvents || {},
+    fetchCaptchaImage: data.fetchCaptchaImage !== false,
+    unattendedMode: Boolean(data.unattendedMode),
   });
 });
 
@@ -156,7 +158,22 @@ router.patch('/settings', async (req, res) => {
     hasTixuisid: Boolean(data.tixuisid),
     ticketQuantity: data.ticketQuantity || 1,
     notifyEvents: data.notifyEvents || {},
+    fetchCaptchaImage: data.fetchCaptchaImage !== false,
+    unattendedMode: Boolean(data.unattendedMode),
   });
+});
+
+// ===== Browser Control =====
+const { setAllBrowsersVisibility } = require('../scrapers/browser');
+
+router.post('/browser/visibility', async (req, res) => {
+  const { visible } = req.body;
+  try {
+    await setAllBrowsersVisibility(Boolean(visible));
+    res.json({ success: true, visible: Boolean(visible) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 // ===== OCR Proxy =====

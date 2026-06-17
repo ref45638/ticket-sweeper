@@ -75,7 +75,7 @@ async function getBrowser(role = 'scout') {
       } catch (err) {}
 
       const { browser } = await connect({
-        headless: config.browserHeadless ? 'auto' : false,
+        headless: (config.browserHeadless && role !== 'killer') ? 'auto' : false,
         turnstile: true,
         fingerprint: true,
         customConfig: {
@@ -84,8 +84,8 @@ async function getBrowser(role = 'scout') {
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
-          // 如果 headless=false，把視窗藏到螢幕外
-          ...(config.browserHeadless ? [] : ['--window-position=0,0']),
+          // 如果 headless=false，把視窗藏到螢幕外 (killer 例外，維持可見)
+          ...(config.browserHeadless || role === 'killer' ? [] : ['--window-position=-2000,-2000']),
         ],
         connectOption: {
           defaultViewport: null,
@@ -250,4 +250,45 @@ async function withPage(optionsOrFn, fnIfOptions) {
   }
 }
 
-module.exports = { isBrowserAlive, resetBrowser, triggerAmnesia, withPage, simulateHumanBehavior };
+async function setBrowserVisibility(role = 'scout', visible = true) {
+  if (!browserInstances[role]) return;
+  try {
+    const browser = browserInstances[role];
+    const pages = await browser.pages();
+    let session = null;
+    let windowId = null;
+
+    for (const page of pages) {
+      try {
+        session = await page.target().createCDPSession();
+        const res = await session.send('Browser.getWindowForTarget');
+        windowId = res.windowId;
+        break;
+      } catch (e) {
+        if (session) {
+          await session.detach().catch(() => {});
+          session = null;
+        }
+      }
+    }
+
+    if (session && windowId !== null) {
+      await session.send('Browser.setWindowBounds', {
+        windowId,
+        bounds: { left: visible ? 0 : -2000, top: visible ? 0 : -2000, windowState: 'normal' }
+      });
+      await session.detach();
+    } else {
+      log.warn('browser', `[${role.toUpperCase()}] 找不到可用來取得 Window ID 的頁面`);
+    }
+  } catch (err) {
+    log.error('browser', `[${role.toUpperCase()}] 切換視窗顯示失敗: ${err.message}`);
+  }
+}
+
+async function setAllBrowsersVisibility(visible = true) {
+  // 只控制 scout 視窗，killer 維持顯示不隱藏
+  await setBrowserVisibility('scout', visible);
+}
+
+module.exports = { isBrowserAlive, resetBrowser, triggerAmnesia, withPage, simulateHumanBehavior, setAllBrowsersVisibility };

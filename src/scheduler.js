@@ -192,8 +192,11 @@ async function runScrapeCycle() {
     }
 
     // 偷抓拓元驗證碼圖片
-    log.info('scheduler', '偷抓拓元驗證碼圖片');
-    await fetchCaptcha();
+    const globalSettings = await settings.getSettings();
+    if (globalSettings.fetchCaptchaImage !== false) {
+      log.info('scheduler', '偷抓拓元驗證碼圖片');
+      await fetchCaptcha();
+    }
   } catch (err) {
     log.error('scheduler', '週期異常', err.message);
     state.setSchedulerMeta({ lastError: err.message });
