@@ -5,9 +5,15 @@ const crypto = require('crypto');
 const SITES_PATH = path.join(__dirname, '../sites.json');
 
 async function readSitesFile() {
-  const raw = await fs.readFile(SITES_PATH, 'utf8');
-  const data = JSON.parse(raw);
-  return Array.isArray(data) ? data : [];
+  try {
+    const raw = await fs.readFile(SITES_PATH, 'utf8');
+    const data = JSON.parse(raw);
+    return Array.isArray(data) ? data : [];
+  } catch {
+    // sites.json 已不進版控，新環境/初次啟動可能不存在或損毀 → 回空清單，
+    // 後續 createSite 會自動建立檔案。
+    return [];
+  }
 }
 
 async function writeSitesFile(sites) {

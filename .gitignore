@@ -5,3 +5,7 @@ node_modules/
 Thumbs.db
 data/
 captchas*/
+
+# 個人執行期狀態 / 含登入憑證(TIXUISID)，不進版控
+src/settings.json
+src/sites.json
