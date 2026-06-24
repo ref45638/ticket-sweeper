@@ -530,6 +530,8 @@ async function attemptAddToCart(site) {
       const { chosen: clickedAreaInfo } = await killerPage.evaluate(parseAreaList, { markRandomAvailable: true });
 
       if (!clickedAreaInfo) {
+        // Scout 偵測到票、但 Killer 趕到時已被搶光——這是有用的「差一點」訊號，主動通知。
+        await notifier.sendDirect(`🏃 [${site.label || '拓元演唱會'}] 偵測到有票，但 Killer 趕到時已被搶光（手慢一步）。`);
         return { success: false, message: 'Killer 找不到可點擊的購票連結（票已售完）' };
       }
 
