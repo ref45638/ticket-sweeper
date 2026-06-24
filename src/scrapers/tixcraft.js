@@ -10,6 +10,34 @@ const activeCartTasks = new Set();
 
 const OCR_BASE64_URL = 'http://127.0.0.1:8000/ocr/base64';
 
+// 驗證碼選擇器（主搶票、重試兩條路徑共用，避免各自寫不同字串造成漂移）。
+// tixcraft 實際的驗證碼 img id 為 TicketForm_verifyCode-image；保留 imageRandom 與通用 fallback 以防改版。
+const CAPTCHA_IMG_SELECTOR = '#TicketForm_verifyCode-image, #TicketForm_imageRandom, img[src*="captcha"], img[id*="captcha"]';
+const CAPTCHA_INPUT_SELECTOR = '#TicketForm_verifyCode, input[name*="verify"], input[name*="captcha"]';
+
+/**
+ * 在瀏覽器 context 內判斷目前頁面是否為 WAF / Cloudflare 阻擋（挑戰）頁。
+ * 注意：此函式會被序列化後丟進 page.evaluate 執行，請勿引用任何外部變數。
+ * @returns {string|null} 命中的阻擋類型字串；未阻擋時回傳 null
+ */
+function detectBlockPage() {
+  if (
+    document.querySelector(
+      '#challenge-running, #challenge-form, .cf-turnstile, iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]'
+    )
+  ) {
+    return 'cloudflare-challenge';
+  }
+  const haystack = ((document.title || '') + ' ' + (document.body ? document.body.innerText : '')).toLowerCase();
+  if (/just a moment|checking your browser|attention required|enable javascript and cookies|verifying you are human/.test(haystack)) {
+    return 'cloudflare-interstitial';
+  }
+  if (/access denied|error 1020|403 forbidden/.test(haystack)) {
+    return 'access-denied';
+  }
+  return null;
+}
+
 /**
  * 在瀏覽器 context 內解析 tixcraft 區域列表（Scout 與 Killer 共用同一套「可購/售完/熱賣」判斷）。
  * 注意：此函式會被序列化後丟進 page.evaluate 執行，請勿引用任何外部變數。
@@ -177,9 +205,9 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
         const targetQty = checkSite.targetQuantity || site.ticketQuantity || 2;
         await fillQuantityAndAgree(page, targetQty);
 
-        const captchaText = await recognizeCaptcha(page, '#TicketForm_verifyCode-image');
+        const captchaText = await recognizeCaptcha(page, CAPTCHA_IMG_SELECTOR);
         if (captchaText) {
-          await page.type('#TicketForm_verifyCode', captchaText, { delay: 50 });
+          await page.type(CAPTCHA_INPUT_SELECTOR, captchaText, { delay: 50 });
         }
 
         const submitted = await clickSubmit(page);
@@ -525,8 +553,8 @@ async function attemptAddToCart(site) {
       }
 
       // Step 4~7: 全自動填單與驗證碼辨識，最多重試 5 次（每次失敗就重整頁面換新驗證碼）
-      const captchaInputSelector = '#TicketForm_verifyCode, input[name*="verify"], input[name*="captcha"]';
-      const captchaImgSelector = '#TicketForm_imageRandom, img[src*="captcha"], img[id*="captcha"]';
+      const captchaInputSelector = CAPTCHA_INPUT_SELECTOR;
+      const captchaImgSelector = CAPTCHA_IMG_SELECTOR;
       const desiredQty = site.ticketQuantity || 1;
       const MAX_CAPTCHA_ATTEMPTS = 5;
 
@@ -610,6 +638,37 @@ async function attemptAddToCart(site) {
   });
 }
 
+const AREA_LIST_SELECTOR = 'ul.area-list li, .area-list li, ul li';
+
+/**
+ * 導航到區域頁並確保區域列表就緒（混合策略）。
+ * - 快路徑：domcontentloaded 載入（售票頁有輪詢/廣告，networkidle2 會等不到閒置而拖慢；
+ *   區域列表本來就在初始 HTML，暖態下這條最快，實測比 networkidle2 快約 60%）。
+ * - 退路：快路徑沒即時等到列表（常見於開機/失憶後第一輪卡在 Cloudflare 挑戰頁，
+ *   domcontentloaded 會在挑戰頁就返回），改用 networkidle2 重載一次，等網路真正閒置、
+ *   跨過挑戰解算，拿回冷態韌性。
+ * @returns {Promise<boolean>} 區域列表是否就緒
+ */
+async function gotoAreaPage(page, url) {
+  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+
+  let ready = await page
+    .waitForSelector(AREA_LIST_SELECTOR, { timeout: 12_000 })
+    .then(() => true)
+    .catch(() => false);
+
+  if (!ready) {
+    log.info('tixcraft', '[Scout] 列表未即時出現，改用 networkidle2 重載一次（冷載入/挑戰頁退路）…');
+    await page.reload({ waitUntil: 'networkidle2', timeout: 30_000 }).catch(() => {});
+    ready = await page
+      .waitForSelector(AREA_LIST_SELECTOR, { timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+  }
+
+  return ready;
+}
+
 async function scrapeTixcraft(url, site = {}) {
   if (activeCartTasks.has(site.id)) {
     log.info('tixcraft', `[${site.id}] 正在背景排隊搶票中，暫停主輪詢`);
@@ -623,13 +682,17 @@ async function scrapeTixcraft(url, site = {}) {
   }
 
   const result = await withPage(async (page) => {
-    await page.goto(url, { waitUntil: 'networkidle2', timeout: 45_000 });
+    const listReady = await gotoAreaPage(page, url);
 
-    try {
-      await page.waitForSelector('ul.area-list li, .area-list li, ul li', {
-        timeout: 15_000,
-      });
-    } catch (err) {
+    if (!listReady) {
+      // 兩條路徑都沒等到列表：先確認是不是被 WAF / Cloudflare 擋住的挑戰頁。
+      // 是的話拋錯，讓 scheduler 的連續阻擋偵測（consecutiveBlocks）能真正計數並觸發失憶；
+      // 否則才視為「目前無票」回傳空結果。
+      const blockType = await page.evaluate(detectBlockPage).catch(() => null);
+      if (blockType) {
+        log.warn('tixcraft', `[Scout] 偵測到疑似 WAF 阻擋頁：${blockType}`);
+        throw new Error(`WAF blocked: ${blockType}`);
+      }
       log.warn('tixcraft', `[Scout] 等待區域列表出現逾時，視為目前無票處理。`);
       return {
         sections: [],
@@ -719,4 +782,14 @@ function matches(url) {
   return /tixcraft\.com\/ticket\/area\//i.test(url);
 }
 
-module.exports = { scrapeTixcraft, fetchCaptcha, matches };
+module.exports = {
+  scrapeTixcraft,
+  fetchCaptcha,
+  matches,
+  // 匯出供測試使用
+  parseAreaList,
+  detectBlockPage,
+  gotoAreaPage,
+  CAPTCHA_IMG_SELECTOR,
+  CAPTCHA_INPUT_SELECTOR,
+};
