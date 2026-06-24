@@ -8,6 +8,97 @@ const sitesStore = require('../config/sites');
 
 const activeCartTasks = new Set();
 
+const OCR_BASE64_URL = 'http://127.0.0.1:8000/ocr/base64';
+
+/**
+ * 在瀏覽器 context 內解析 tixcraft 區域列表（Scout 與 Killer 共用同一套「可購/售完/熱賣」判斷）。
+ * 注意：此函式會被序列化後丟進 page.evaluate 執行，請勿引用任何外部變數。
+ *
+ * @param {{ markRandomAvailable?: boolean }} [opts]
+ *   markRandomAvailable=true 時，會在「可購且非輪椅/身障」的區域中隨機挑一個，
+ *   於其連結標上 data-killer-target，供呼叫端後續點擊。
+ * @returns {{ sections: Array, chosen: ({ name: string } | null) }}
+ */
+function parseAreaList({ markRandomAvailable = false } = {}) {
+  const NAV_BLOCKLIST = /^(Events|My Tickets|Sign In|Menu|Home|Clear|Search)/i;
+  const stripName = (text) =>
+    text
+      .replace(/剩餘\s*\d+/g, '')
+      .replace(/\d+\s*seat\(s\)\s*remaining/gi, '')
+      .replace(/熱賣中|熱銷中/gi, '')
+      .replace(/已售完/gi, '')
+      .replace(/Sold\s*out/gi, '')
+      .trim();
+
+  const listRoots = document.querySelectorAll('ul.area-list, .zone.area-list');
+  const lis = listRoots.length > 0 ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')]) : [...document.querySelectorAll('li')];
+
+  if (markRandomAvailable) {
+    // 清除上一輪可能殘留的標記，避免選擇器抓到舊節點
+    document.querySelectorAll('a[data-killer-target]').forEach((a) => a.removeAttribute('data-killer-target'));
+  }
+
+  const sections = [];
+  const candidates = []; // 可購且非輪椅/身障，供 Killer 隨機挑選
+  const seen = new Set();
+
+  for (const li of lis) {
+    const anchor = li.querySelector('a');
+    const font = li.querySelector('font');
+    const text = (li.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!text || NAV_BLOCKLIST.test(text)) continue;
+
+    const id = anchor?.id || null;
+    const isSelectable = [...li.classList].some((c) => c.startsWith('select_form_'));
+    const fontColor = font?.getAttribute('color')?.toUpperCase() || '';
+    const fontText = (font?.textContent || '').replace(/\s+/g, ' ').trim();
+
+    let remaining = 0;
+    const remainZh = text.match(/剩餘\s*(\d+)/);
+    const remainEn = text.match(/(\d+)\s*seat\(s\)\s*remaining/i);
+    if (remainZh) remaining = parseInt(remainZh[1], 10);
+    else if (remainEn) remaining = parseInt(remainEn[1], 10);
+
+    const hotSelling = /熱賣中|熱銷中/i.test(text) || /熱賣中|熱銷中/i.test(fontText);
+    const explicitlySoldOut = /已售完/i.test(text) || /Sold\s*out/i.test(text);
+    const graySoldOut = fontColor === '#AAAAAA' && explicitlySoldOut;
+    const soldOut = explicitlySoldOut || graySoldOut || (!anchor && !isSelectable);
+    const available = !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
+    const isIgnored = text.includes('輪椅') || text.includes('身障');
+
+    const name = stripName(text);
+    if (!name || name.length < 2) continue;
+
+    const dedupeKey = `${id || ''}:${name}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    sections.push({
+      id,
+      href: anchor?.href || null,
+      name,
+      remaining: Number.isFinite(remaining) && remaining > 0 ? remaining : 0,
+      hotSelling,
+      available,
+      soldOut: !available,
+      clickable: isSelectable && Boolean(anchor),
+    });
+
+    if (available && !isIgnored && anchor) {
+      candidates.push({ name, anchor });
+    }
+  }
+
+  let chosen = null;
+  if (markRandomAvailable && candidates.length > 0) {
+    const pick = candidates[Math.floor(Math.random() * candidates.length)];
+    pick.anchor.setAttribute('data-killer-target', 'true');
+    chosen = { name: pick.name };
+  }
+
+  return { sections, chosen };
+}
+
 async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) {
   const siteId = site.id;
   const domain = '.tixcraft.com';
@@ -84,56 +175,14 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
         log.info('tixcraft', `[${siteId}] 重新執行填寫數量與驗證碼...`);
 
         const targetQty = checkSite.targetQuantity || site.ticketQuantity || 2;
-        await page.evaluate((qty) => {
-          const selects = Array.from(document.querySelectorAll('select'));
-          for (const s of selects) {
-            if (s.id && s.id.includes('TicketForm_ticketPrice')) {
-              const opts = Array.from(s.querySelectorAll('option')).map((o) => parseInt(o.value, 10));
-              const maxQty = Math.max(...opts.filter((v) => !isNaN(v)));
-              if (maxQty > 0) {
-                const val = Math.min(qty, maxQty);
-                s.value = val;
-                s.dispatchEvent(new Event('change', { bubbles: true }));
-                return true;
-              }
-            }
-          }
-          return false;
-        }, targetQty);
+        await fillQuantityAndAgree(page, targetQty);
 
-        await page.evaluate(() => {
-          const chk = document.querySelector('input[type="checkbox"]#TicketForm_agree');
-          if (chk && !chk.checked) {
-            chk.click();
-          }
-        });
-
-        const captchaImg = await page.$('#TicketForm_verifyCode-image');
-        if (captchaImg) {
-          try {
-            const base64 = await captchaImg.screenshot({ encoding: 'base64' });
-            const res = await fetch('http://127.0.0.1:8000/ocr/base64', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ image_base64: base64 }),
-            });
-            const data = await res.json();
-            if (data.success && data.text) {
-              await page.type('#TicketForm_verifyCode', data.text, { delay: 50 });
-            }
-          } catch (e) {
-            log.warn('tixcraft', `[${siteId}] OCR failed: ${e.message}`);
-          }
+        const captchaText = await recognizeCaptcha(page, '#TicketForm_verifyCode-image');
+        if (captchaText) {
+          await page.type('#TicketForm_verifyCode', captchaText, { delay: 50 });
         }
 
-        const submitted = await page.evaluate(() => {
-          const btn = document.querySelector('button[type="submit"], input[type="submit"], .btn-primary, #submitBtn');
-          if (btn) {
-            btn.click();
-            return true;
-          }
-          return false;
-        });
+        const submitted = await clickSubmit(page);
 
         if (submitted) {
           log.info('tixcraft', `[${siteId}] 重試：已自動送出，進入排隊觀察...`);
@@ -357,7 +406,7 @@ async function recognizeCaptcha(page, imgSelector) {
 
     const base64Data = await captchaImg.screenshot({ encoding: 'base64' });
     log.info('tixcraft', '⏳ 正在呼叫 OCR API 解析驗證碼...');
-    const response = await fetch('http://127.0.0.1:8000/ocr/base64', {
+    const response = await fetch(OCR_BASE64_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image_base64: base64Data }),
@@ -449,64 +498,8 @@ async function attemptAddToCart(site) {
         return { success: false, message: 'Killer 多次嘗試載入區域皆卡住，放棄本次任務' };
       }
 
-      // Step 2.5: Killer 判斷有票的區域並隨機選一個點擊
-      const clickedAreaInfo = await killerPage.evaluate(() => {
-        const NAV_BLOCKLIST = /^(Events|My Tickets|Sign In|Menu|Home|Clear|Search)/i;
-        const listRoots = document.querySelectorAll('ul.area-list, .zone.area-list');
-        const lis = listRoots.length > 0 ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')]) : [...document.querySelectorAll('li')];
-
-        // 清除上一輪可能殘留的標記，避免選擇器抓到舊節點
-        document.querySelectorAll('a[data-killer-target]').forEach((a) => a.removeAttribute('data-killer-target'));
-
-        const availableAnchors = [];
-
-        for (const li of lis) {
-          const anchor = li.querySelector('a');
-          const font = li.querySelector('font');
-          const text = (li.textContent || '').replace(/\s+/g, ' ').trim();
-          if (!text || NAV_BLOCKLIST.test(text)) continue;
-
-          // 忽略輪椅席
-          if (text.includes('輪椅') || text.includes('身障')) continue;
-
-          const isSelectable = [...li.classList].some((c) => c.startsWith('select_form_'));
-          const fontColor = font?.getAttribute('color')?.toUpperCase() || '';
-          const fontText = (font?.textContent || '').replace(/\s+/g, ' ').trim();
-
-          let remaining = 0;
-          const remainZh = text.match(/剩餘\s*(\d+)/);
-          const remainEn = text.match(/(\d+)\s*seat\(s\)\s*remaining/i);
-          if (remainZh) remaining = parseInt(remainZh[1], 10);
-          else if (remainEn) remaining = parseInt(remainEn[1], 10);
-
-          const hotSelling = /熱賣中|熱銷中/i.test(text) || /熱賣中|熱銷中/i.test(fontText);
-          const explicitlySoldOut = /已售完/i.test(text) || /Sold\s*out/i.test(text);
-          const graySoldOut = fontColor === '#AAAAAA' && explicitlySoldOut;
-
-          const soldOut = explicitlySoldOut || graySoldOut || (!anchor && !isSelectable);
-          const available = !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
-
-          if (available && anchor) {
-            const name = text
-              .replace(/剩餘\s*\d+/g, '')
-              .replace(/\d+\s*seat\(s\)\s*remaining/gi, '')
-              .replace(/熱賣中|熱銷中/gi, '')
-              .replace(/已售完/gi, '')
-              .replace(/Sold\s*out/gi, '')
-              .trim();
-            availableAnchors.push({ name, anchor });
-          }
-        }
-
-        if (availableAnchors.length === 0) {
-          return null;
-        }
-
-        // 隨機選一個，並只在被選中的那個 anchor 上做唯一標記
-        const chosen = availableAnchors[Math.floor(Math.random() * availableAnchors.length)];
-        chosen.anchor.setAttribute('data-killer-target', 'true');
-        return { name: chosen.name };
-      });
+      // Step 2.5: Killer 判斷有票的區域並隨機選一個（共用 parseAreaList 標記，於下方點擊）
+      const { chosen: clickedAreaInfo } = await killerPage.evaluate(parseAreaList, { markRandomAvailable: true });
 
       if (!clickedAreaInfo) {
         return { success: false, message: 'Killer 找不到可點擊的購票連結（票已售完）' };
@@ -648,67 +641,7 @@ async function scrapeTixcraft(url, site = {}) {
     // 模擬人類瀏覽行為
     await simulateHumanBehavior(page);
 
-    const rawSections = await page.evaluate(() => {
-      const items = [];
-      const seen = new Set();
-      const NAV_BLOCKLIST = /^(Events|My Tickets|Sign In|Menu|Home|Clear|Search)/i;
-
-      const listRoots = document.querySelectorAll('ul.area-list, .zone.area-list');
-      const lis = listRoots.length > 0 ? Array.from(listRoots).flatMap((root) => [...root.querySelectorAll('li')]) : [...document.querySelectorAll('li')];
-
-      for (const li of lis) {
-        const anchor = li.querySelector('a');
-        const font = li.querySelector('font');
-        const text = (li.textContent || '').replace(/\s+/g, ' ').trim();
-        if (!text || NAV_BLOCKLIST.test(text)) continue;
-
-        const id = anchor?.id || null;
-        const isSelectable = [...li.classList].some((c) => c.startsWith('select_form_'));
-        const fontColor = font?.getAttribute('color')?.toUpperCase() || '';
-        const fontText = (font?.textContent || '').replace(/\s+/g, ' ').trim();
-
-        let remaining = 0;
-        const remainZh = text.match(/剩餘\s*(\d+)/);
-        const remainEn = text.match(/(\d+)\s*seat\(s\)\s*remaining/i);
-        if (remainZh) remaining = parseInt(remainZh[1], 10);
-        else if (remainEn) remaining = parseInt(remainEn[1], 10);
-
-        const hotSelling = /熱賣中|熱銷中/i.test(text) || /熱賣中|熱銷中/i.test(fontText);
-        const explicitlySoldOut = /已售完/i.test(text) || /Sold\s*out/i.test(text);
-        const graySoldOut = fontColor === '#AAAAAA' && explicitlySoldOut;
-
-        const soldOut = explicitlySoldOut || graySoldOut || (!anchor && !isSelectable);
-
-        const available = !soldOut && isSelectable && Boolean(anchor) && (remaining > 0 || hotSelling || fontColor === '#FF0000');
-
-        let name = text
-          .replace(/剩餘\s*\d+/g, '')
-          .replace(/\d+\s*seat\(s\)\s*remaining/gi, '')
-          .replace(/熱賣中|熱銷中/gi, '')
-          .replace(/已售完/gi, '')
-          .replace(/Sold\s*out/gi, '')
-          .trim();
-
-        if (!name || name.length < 2) continue;
-
-        const dedupeKey = `${id || ''}:${name}`;
-        if (seen.has(dedupeKey)) continue;
-        seen.add(dedupeKey);
-
-        items.push({
-          id,
-          href: anchor?.href || null,
-          name,
-          remaining: Number.isFinite(remaining) && remaining > 0 ? remaining : 0,
-          hotSelling,
-          available,
-          soldOut: !available,
-          clickable: isSelectable && Boolean(anchor),
-        });
-      }
-
-      return items;
-    });
+    const { sections: rawSections } = await page.evaluate(parseAreaList);
 
     const sections = rawSections.map(classifySection).sort((a, b) => {
       const order = { available: 0, soldOut: 1, ignored: 2 };
