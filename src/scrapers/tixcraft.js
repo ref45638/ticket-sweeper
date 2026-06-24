@@ -511,7 +511,7 @@ async function attemptAddToCart(site) {
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         const gotoTimeout = Math.min(BASE_TIMEOUT * 2 ** (attempt - 1), MAX_TIMEOUT);
         const selectorTimeout = Math.round(gotoTimeout * 0.6);
-        log.info('tixcraft', `[Killer] 前往活動頁面準備判斷區域 (嘗試 ${attempt}/${MAX_RETRIES}, 逾時 ${gotoTimeout}ms): ${site.url}`);
+        log.info('tixcraft', `[Killer] 前往活動頁面準備判斷區域 (嘗試 ${attempt}/${MAX_RETRIES}, goto逾時 ${gotoTimeout}ms / 等列表 ${selectorTimeout}ms): ${site.url}`);
         try {
           await killerPage.goto(site.url, { waitUntil: 'domcontentloaded', timeout: gotoTimeout });
           await killerPage.waitForSelector('ul.area-list li, .area-list li, ul li', { timeout: selectorTimeout });
