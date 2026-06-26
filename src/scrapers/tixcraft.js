@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { withPage, simulateHumanBehavior, resetBrowser } = require('./browser');
+const { withPage, simulateHumanBehavior, resetBrowser, isInstanceAlive } = require('./browser');
 const log = require('../logger');
 const notifier = require('../notifier');
 const settings = require('../config/settings');
@@ -225,15 +225,8 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
   } finally {
     log.info('tixcraft', `[${siteId}] 背景任務結束，正在關閉分頁與清除狀態...`);
     activeCartTasks.delete(siteId);
-
-    // Since keepAlive was true, we must manually close it here
-    // Also remove the injected cookie to be safe
-    await removeCookie(page, domain).catch(() => {});
-    await page.close().catch(() => {});
-    // 沒有其他殺手任務在進行時，直接關閉整個 killer 瀏覽器，而非只關分頁
-    if (activeCartTasks.size === 0) {
-      await resetBrowser('killer').catch(() => {});
-    }
+    // keepAlive 的背景分頁需自行關閉；cleanupKiller 依保溫開關決定是否保留瀏覽器
+    await cleanupKiller(page, domain, { closePage: true });
   }
 }
 
@@ -328,6 +321,54 @@ async function removeCookie(page, domain) {
     log.info('tixcraft', '已清除所有 Tixcraft Cookie，徹底恢復匿名');
   } catch (err) {
     log.warn('tixcraft', `清除 Cookie 失敗: ${err.message}`);
+  }
+}
+
+/**
+ * 只移除 TIXUISID（回到匿名），保留 cf_clearance 等匿名 cookie 以維持暖狀態。
+ * 用於保溫模式：搶完票回匿名，但不丟掉好不容易過 Cloudflare 的成果。
+ */
+async function removeLoginCookie(page) {
+  try {
+    const cookies = await page.cookies(page.url());
+    for (const c of cookies) {
+      if (c.name === 'TIXUISID') {
+        await page.deleteCookie({ name: c.name, domain: c.domain, path: c.path });
+      }
+    }
+    log.info('tixcraft', '[Killer] 已移除 TIXUISID 回到匿名（保留 CF 暖狀態）');
+  } catch (err) {
+    log.warn('tixcraft', `移除 TIXUISID 失敗: ${err.message}`);
+  }
+}
+
+/**
+ * 一次 killer 工作結束後的清理（依保溫開關決定行為）。
+ * - 保溫 (warmKiller)：只移除 TIXUISID 回匿名，保留瀏覽器與 CF 暖狀態待命。
+ * - 一般：徹底清 cookie，沒有其他任務時關閉整個 killer 瀏覽器。
+ * @param {{ closePage?: boolean }} opts closePage=true 時會自行關閉分頁
+ *   （keepAlive 的背景分頁需要；attemptAddToCart 內由 withPage 關閉，給 false）
+ */
+async function cleanupKiller(page, domain, { closePage = false } = {}) {
+  let warm = false;
+  try {
+    warm = Boolean((await settings.getSettings()).warmKiller);
+  } catch {}
+
+  if (warm) {
+    await removeLoginCookie(page).catch(() => {});
+  } else {
+    await removeCookie(page, domain).catch(() => {});
+  }
+
+  if (closePage) await page.close().catch(() => {});
+
+  if (activeCartTasks.size === 0) {
+    if (warm) {
+      log.info('tixcraft', '[Killer] 保溫模式：搶票結束，保留瀏覽器待命');
+    } else {
+      await resetBrowser('killer').catch(() => {});
+    }
   }
 }
 
@@ -469,12 +510,8 @@ async function watchManualCaptcha(page, site, domain) {
     log.warn('tixcraft', `[${site.id}] 手動處理逾時 30 秒，自動關閉 Killer 並交回 Scout 重新輪詢`);
   }
 
-  await removeCookie(page, domain).catch(() => {});
   activeCartTasks.delete(site.id);
-  await page.close().catch(() => {});
-  if (activeCartTasks.size === 0) {
-    await resetBrowser('killer').catch(() => {});
-  }
+  await cleanupKiller(page, domain, { closePage: true });
 }
 
 /**
@@ -629,12 +666,9 @@ async function attemptAddToCart(site) {
     } finally {
       // 如果沒有開啟 keepAlive（例如沒找到 submit 或是出錯），才清除 Cookie
       if (!killerPage.keepAlive) {
-        await removeCookie(killerPage, domain);
         activeCartTasks.delete(site.id); // 沒有移交背景時才在這裡解鎖
-        // 沒有其他殺手任務（含背景排隊）在進行時，直接關閉整個 killer 瀏覽器，而非只關分頁
-        if (activeCartTasks.size === 0) {
-          await resetBrowser('killer').catch(() => {});
-        }
+        // 分頁由 withPage 關閉；cleanupKiller 依保溫開關決定是否保留瀏覽器
+        await cleanupKiller(killerPage, domain, { closePage: false });
       }
     }
   });
@@ -784,10 +818,49 @@ function matches(url) {
   return /tixcraft\.com\/ticket\/area\//i.test(url);
 }
 
+/**
+ * 預熱 / 保溫 Killer（方案 A）：匿名導航刷新 Cloudflare 通行，
+ * 讓真正搶票時免去冷啟動的 ~14s（暖態實測約 0.8s）。由 scheduler 定時呼叫。
+ * - 搶票進行中不打擾。
+ * - warmKiller 關閉時：若仍有閒置的 killer 瀏覽器醒著，順手關掉釋放資源。
+ * - 暖的是「第一個啟用站點的 host」（cf_clearance 多為 per-host），最貼近搶票目標。
+ */
+async function keepKillerWarm() {
+  if (activeCartTasks.size > 0) return; // 搶票進行中，別打擾
+
+  let warm = false;
+  try {
+    warm = Boolean((await settings.getSettings()).warmKiller);
+  } catch {}
+
+  if (!warm) {
+    if (isInstanceAlive('killer')) {
+      await resetBrowser('killer').catch(() => {});
+      log.info('tixcraft', '[Killer] 保溫已關閉，關閉閒置中的 killer 瀏覽器');
+    }
+    return;
+  }
+
+  const sites = await sitesStore.listEnabledSites().catch(() => []);
+  const warmUrl = sites[0]?.url || 'https://tixcraft.com/';
+
+  try {
+    await withPage({ role: 'killer' }, async (page) => {
+      await removeLoginCookie(page).catch(() => {}); // 確保匿名暖機
+      await page.goto(warmUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+      await page.waitForSelector('ul.area-list li, .area-list li, body', { timeout: 8_000 }).catch(() => {});
+    });
+    log.info('tixcraft', '[Killer] 已保溫（匿名刷新 Cloudflare 通行）');
+  } catch (err) {
+    log.warn('tixcraft', `[Killer] 保溫失敗（稍後再試）: ${err.message}`);
+  }
+}
+
 module.exports = {
   scrapeTixcraft,
   fetchCaptcha,
   matches,
+  keepKillerWarm,
   // 匯出供測試使用
   parseAreaList,
   detectBlockPage,

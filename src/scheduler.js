@@ -1,7 +1,7 @@
 const config = require('./config/env');
 const sitesStore = require('./config/sites');
 const { scrapeSite } = require('./scrapers');
-const { fetchCaptcha } = require('./scrapers/tixcraft');
+const { fetchCaptcha, keepKillerWarm } = require('./scrapers/tixcraft');
 const { resetBrowser, triggerAmnesia } = require('./scrapers/browser');
 const state = require('./state');
 const notifier = require('./notifier');
@@ -11,6 +11,8 @@ const settings = require('./config/settings');
 let timeoutId = null;
 let scrapeInProgress = false;
 let consecutiveBlocks = 0; // 連續被 WAF 阻擋的次數
+let warmTimer = null; // Killer 保溫定時器（方案 A）
+const WARM_INTERVAL_MS = 10 * 60 * 1000; // 每 10 分鐘刷新一次 Killer 的 Cloudflare 通行
 
 function randomDelay(minMs = 3000, maxMs = 5000) {
   const ms = minMs + Math.floor(Math.random() * (maxMs - minMs));
@@ -247,6 +249,7 @@ function startScheduler() {
   log.info('scheduler', `排程啟動（隨機 jitter），基礎間隔 ${stepMin >= 1 && Number.isInteger(stepMin) ? `${stepMin} 分鐘` : `${config.scrapeIntervalMs / 1000} 秒`}，凌晨 03~09 降頻 5 分鐘`);
 
   scheduleNextTick();
+  startKillerWarmer();
 }
 
 function stopScheduler() {
@@ -254,6 +257,26 @@ function stopScheduler() {
     clearTimeout(timeoutId);
     timeoutId = null;
     log.info('scheduler', '排程已停止');
+  }
+  stopKillerWarmer();
+}
+
+/**
+ * Killer 保溫排程（方案 A）：定期匿名刷新 Killer 的 Cloudflare 通行。
+ * keepKillerWarm 內部會依 warmKiller 開關決定要保溫還是關閉閒置瀏覽器，
+ * 所以這個 timer 一律啟動、由設定控制行為。
+ */
+function startKillerWarmer() {
+  if (warmTimer) return;
+  // 啟動後稍等再預熱一次，避免和開機其他初始化搶資源
+  setTimeout(() => keepKillerWarm().catch((e) => log.warn('scheduler', `保溫例外: ${e.message}`)), 15_000);
+  warmTimer = setInterval(() => keepKillerWarm().catch((e) => log.warn('scheduler', `保溫例外: ${e.message}`)), WARM_INTERVAL_MS);
+}
+
+function stopKillerWarmer() {
+  if (warmTimer) {
+    clearInterval(warmTimer);
+    warmTimer = null;
   }
 }
 

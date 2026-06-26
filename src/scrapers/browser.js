@@ -84,6 +84,8 @@ async function getBrowser(role = 'scout') {
         args: [
           '--no-sandbox',
           '--disable-setuid-sandbox',
+          // 視窗寬度至少 1200，避免可見視窗過小
+          `--window-size=${Math.max(1200, currentViewports[role].width)},${currentViewports[role].height}`,
           // 如果 headless=false，把視窗藏到螢幕外 (killer 例外，維持可見)
           ...(config.browserHeadless || role === 'killer' ? [] : ['--window-position=-2000,-2000']),
         ],
@@ -120,6 +122,13 @@ async function isBrowserAlive(role = 'scout') {
   } catch {
     return false;
   }
+}
+
+/**
+ * 純檢查既有實例是否還活著，不會像 isBrowserAlive 那樣在沒有時自動啟動瀏覽器。
+ */
+function isInstanceAlive(role = 'scout') {
+  return Boolean(browserInstances[role] && browserInstances[role].isConnected());
 }
 
 async function resetBrowser(role = 'all') {
@@ -291,4 +300,4 @@ async function setAllBrowsersVisibility(visible = true) {
   await setBrowserVisibility('scout', visible);
 }
 
-module.exports = { isBrowserAlive, resetBrowser, triggerAmnesia, withPage, simulateHumanBehavior, setAllBrowsersVisibility };
+module.exports = { isBrowserAlive, isInstanceAlive, resetBrowser, triggerAmnesia, withPage, simulateHumanBehavior, setAllBrowsersVisibility };

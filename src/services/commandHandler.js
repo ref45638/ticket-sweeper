@@ -96,7 +96,10 @@ async function processCommand(text) {
         '  (例如: /set TIXUISID odkqwodkwqod)\n\n' +
         '- /set 離座模式 [on/off]：離座(無人值守)模式\n' +
         '  開啟後，驗證碼自動辨識失敗就直接放棄、交回 Scout 繼續輪詢，\n' +
-        '  不會保留瀏覽器等你手動填寫。(別名: /set unattended on)'
+        '  不會保留瀏覽器等你手動填寫。(別名: /set unattended on)\n\n' +
+        '- /set 保溫 [on/off]：Killer 保溫(預熱)模式\n' +
+        '  開啟後，搶票用的瀏覽器會常駐並定期匿名刷新 Cloudflare 通行，\n' +
+        '  讓真正搶票時免去冷啟動約 14 秒。(別名: /set warm on)'
       );
     }
 
@@ -125,6 +128,24 @@ async function processCommand(text) {
         return enabled
           ? '🚪 已開啟「離座模式」：驗證碼辨識失敗將直接放棄並交回 Scout 繼續輪詢。'
           : '🪑 已關閉「離座模式」：驗證碼辨識失敗會保留瀏覽器 30 秒等待手動填寫。';
+      } catch (e) {
+        return `❌ 設定失敗：${e.message}`;
+      }
+    }
+
+    if (key === '保溫' || key.toLowerCase() === 'warm' || key.toLowerCase() === 'warmkiller') {
+      const v = (value || '').toLowerCase();
+      const onWords = ['on', '開', '啟用', 'true', '1'];
+      const offWords = ['off', '關', '停用', 'false', '0'];
+      if (!onWords.includes(v) && !offWords.includes(v)) {
+        return '❌ 請指定 on 或 off，例如：/set 保溫 on';
+      }
+      const enabled = onWords.includes(v);
+      try {
+        await settingsStore.patchSettings({ warmKiller: enabled });
+        return enabled
+          ? '🔥 已開啟「Killer 保溫」：搶票瀏覽器會常駐並定期匿名刷新 Cloudflare，真正搶票時免去冷啟動約 14 秒。'
+          : '❄️ 已關閉「Killer 保溫」：搶完票即關閉瀏覽器（下次搶票需重新冷啟動）。';
       } catch (e) {
         return `❌ 設定失敗：${e.message}`;
       }

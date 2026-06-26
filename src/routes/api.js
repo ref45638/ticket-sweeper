@@ -148,6 +148,7 @@ router.get('/settings', async (_req, res) => {
     notifyEvents: data.notifyEvents || {},
     fetchCaptchaImage: data.fetchCaptchaImage !== false,
     unattendedMode: Boolean(data.unattendedMode),
+    warmKiller: Boolean(data.warmKiller),
   });
 });
 
@@ -160,6 +161,7 @@ router.patch('/settings', async (req, res) => {
     notifyEvents: data.notifyEvents || {},
     fetchCaptchaImage: data.fetchCaptchaImage !== false,
     unattendedMode: Boolean(data.unattendedMode),
+    warmKiller: Boolean(data.warmKiller),
   });
 });
 

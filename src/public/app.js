@@ -244,6 +244,9 @@ const render = {
 
     const unattendedModeToggle = $('#setting-unattendedMode');
     if (unattendedModeToggle) unattendedModeToggle.checked = Boolean(settings.unattendedMode);
+
+    const warmKillerToggle = $('#setting-warmKiller');
+    if (warmKillerToggle) warmKillerToggle.checked = Boolean(settings.warmKiller);
   },
 
   sitesTable(sites) {
@@ -605,6 +608,19 @@ function bindNotifyToggles() {
       } catch (err) {
         toast(err.message);
         unattendedModeToggle.checked = !unattendedModeToggle.checked;
+      }
+    });
+  }
+
+  const warmKillerToggle = $('#setting-warmKiller');
+  if (warmKillerToggle) {
+    warmKillerToggle.addEventListener('change', async () => {
+      try {
+        await api.patchSettings({ warmKiller: warmKillerToggle.checked });
+        toast(warmKillerToggle.checked ? '已開啟 Killer 保溫' : '已關閉 Killer 保溫');
+      } catch (err) {
+        toast(err.message);
+        warmKillerToggle.checked = !warmKillerToggle.checked;
       }
     });
   }
