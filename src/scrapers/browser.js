@@ -86,8 +86,9 @@ async function getBrowser(role = 'scout') {
           '--disable-setuid-sandbox',
           // 視窗寬度至少 1200，避免可見視窗過小
           `--window-size=${Math.max(1200, currentViewports[role].width)},${currentViewports[role].height}`,
-          // 如果 headless=false，把視窗藏到螢幕外 (killer 例外，維持可見)
-          ...(config.browserHeadless || role === 'killer' ? [] : ['--window-position=-2000,-2000']),
+          // Killer 固定顯示在視野內：正向定位到左上 (0,0)，避免 profile 還原到上一次的畫外座標；
+          // headful 的 Scout 則藏到螢幕外；headless 的 Scout 本來就不顯示，不需定位。
+          ...(role === 'killer' ? ['--window-position=0,0'] : config.browserHeadless ? [] : ['--window-position=-2000,-2000']),
         ],
         connectOption: {
           defaultViewport: null,
@@ -101,6 +102,15 @@ async function getBrowser(role = 'scout') {
         log.warn('browser', `[${role.toUpperCase()}] 瀏覽器已斷開連線`);
         browserInstances[role] = null;
       });
+
+      // 啟動後再用 CDP 強制定位一次（不只靠啟動旗標，避免 profile 還原到非預期座標）：
+      // Killer 拉到畫面內、headful 的 Scout 壓到畫外。只在「新啟動」時做一次，
+      // 不會干擾使用者之後手動移動或「顯示視窗」按鈕。
+      if (role === 'killer') {
+        await setBrowserVisibility('killer', true).catch(() => {});
+      } else if (!config.browserHeadless) {
+        await setBrowserVisibility('scout', false).catch(() => {});
+      }
 
       log.info('browser', `[${role.toUpperCase()}] 瀏覽器已啟動`);
       return browser;
