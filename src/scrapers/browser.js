@@ -47,6 +47,11 @@ function getRandomViewport() {
 const browserInstances = { scout: null, killer: null };
 const connectingPromises = { scout: null, killer: null };
 
+// per-origin 常駐（keep-alive）Scout 分頁，供免渲染 in-context fetch 重複使用。
+// 用 per-origin 快取：同時監控多個子網域時，單一分頁每輪都得跨 origin 真實導航會退化回渲染速度；
+// 一個 origin 一顆常駐分頁才能全數受益。
+const scoutPages = new Map(); // origin(string) -> keep-alive Page
+
 async function getBrowser(role = 'scout') {
   if (!['scout', 'killer'].includes(role)) {
     role = 'scout';
@@ -75,7 +80,7 @@ async function getBrowser(role = 'scout') {
       } catch (err) {}
 
       const { browser } = await connect({
-        headless: (config.browserHeadless && role !== 'killer') ? 'auto' : false,
+        headless: config.browserHeadless && role !== 'killer' ? 'auto' : false,
         turnstile: true,
         fingerprint: true,
         customConfig: {
@@ -143,7 +148,7 @@ function isInstanceAlive(role = 'scout') {
 
 async function resetBrowser(role = 'all') {
   const rolesToReset = role === 'all' ? ['scout', 'killer'] : [role];
-  
+
   for (const r of rolesToReset) {
     if (browserInstances[r]) {
       try {
@@ -154,6 +159,8 @@ async function resetBrowser(role = 'all') {
       browserInstances[r] = null;
     }
     connectingPromises[r] = null;
+    // scout 瀏覽器關閉後，常駐 fetch 分頁全數失效，清空快取讓下次 getScoutPage 重建
+    if (r === 'scout') scoutPages.clear();
   }
 }
 
@@ -163,7 +170,7 @@ async function resetBrowser(role = 'all') {
 async function triggerAmnesia(role = 'scout') {
   log.info('browser', `[${role.toUpperCase()}] 執行失憶程序：清理 Profile 並更換特徵...`);
   await resetBrowser(role);
-  
+
   try {
     await fs.rm(PROFILE_DIRS[role], { recursive: true, force: true });
     log.info('browser', `[${role.toUpperCase()}] 已成功刪除 Profile 資料夾 (userDataDir)`);
@@ -176,7 +183,7 @@ async function triggerAmnesia(role = 'scout') {
   currentViewports[role] = getRandomViewport();
   profileLifetimeMs[role] = getRandomLifetime();
   profileCreatedAt[role] = Date.now();
-  
+
   log.info('browser', `[${role.toUpperCase()}] 已抽籤新 Viewport: ${currentViewports[role].width}x${currentViewports[role].height}`);
   log.info('browser', `[${role.toUpperCase()}] 已排定下一次失憶時間: ${Math.round(profileLifetimeMs[role] / 3600000)} 小時後`);
 }
@@ -202,26 +209,11 @@ async function simulateHumanBehavior(page) {
   await new Promise((r) => setTimeout(r, 200 + Math.floor(Math.random() * 400)));
 }
 
-async function withPage(optionsOrFn, fnIfOptions) {
-  let role = 'scout';
-  let keepAlive = false;
-  let fn = null;
-
-  if (typeof optionsOrFn === 'function') {
-    fn = optionsOrFn;
-  } else {
-    role = optionsOrFn.role || 'scout';
-    keepAlive = optionsOrFn.keepAlive || false;
-    fn = fnIfOptions;
-  }
-
-  const browser = await getBrowser(role);
-  const page = await browser.newPage();
-  if (keepAlive) {
-    page.keepAlive = true;
-  }
-  
-  // 透過底層注入 MutationObserver，自動且確實地點擊 Cookie 接受按鈕
+/**
+ * 透過底層注入 MutationObserver，自動且確實地點擊 Cookie 接受按鈕。
+ * 抽成共用函式：withPage 與常駐 getScoutPage 重建分頁時都要注入，避免各自漏掉。
+ */
+async function injectCookieAccept(page) {
   await page.evaluateOnNewDocument(() => {
     window.addEventListener('DOMContentLoaded', () => {
       const tryClickAccept = () => {
@@ -253,6 +245,28 @@ async function withPage(optionsOrFn, fnIfOptions) {
       }
     });
   });
+}
+
+async function withPage(optionsOrFn, fnIfOptions) {
+  let role = 'scout';
+  let keepAlive = false;
+  let fn = null;
+
+  if (typeof optionsOrFn === 'function') {
+    fn = optionsOrFn;
+  } else {
+    role = optionsOrFn.role || 'scout';
+    keepAlive = optionsOrFn.keepAlive || false;
+    fn = fnIfOptions;
+  }
+
+  const browser = await getBrowser(role);
+  const page = await browser.newPage();
+  if (keepAlive) {
+    page.keepAlive = true;
+  }
+
+  await injectCookieAccept(page);
 
   try {
     await page.setViewport(currentViewports[role]);
@@ -267,6 +281,40 @@ async function withPage(optionsOrFn, fnIfOptions) {
       log.info('browser', `[${role.toUpperCase()}] 分頁進入 Keep-Alive 模式，脫離 withPage 生命週期管理`);
     }
   }
+}
+
+/** 常駐分頁驗活：瀏覽器仍連線且分頁未關閉。死因不只斷線——scout 定期失憶、resetBrowser 都會讓它失效。 */
+function isScoutPageAlive(page) {
+  try {
+    return Boolean(page) && !page.isClosed() && page.browser().isConnected();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 取得或建立一個常駐（keep-alive）Scout 分頁，供免渲染 in-context fetch 重複使用。
+ * 每次取用都驗活並自動重建（死因：定期失憶、resetBrowser、斷線），重建時補上 cookie-accept 注入。
+ * 沿用 getBrowser('scout')；分頁維持在哪個 origin 由呼叫端（scrapeTixcraftFast）自行導航決定，
+ * 這裡只負責「給一顆活著、掛好注入的分頁」並以 origin 為 key 快取。
+ * @param {string} origin 目標 origin（作為快取 key）
+ * @returns {Promise<import('puppeteer').Page>}
+ */
+async function getScoutPage(origin) {
+  const cached = scoutPages.get(origin);
+  if (isScoutPageAlive(cached)) {
+    return cached;
+  }
+  if (cached) scoutPages.delete(origin);
+
+  const browser = await getBrowser('scout');
+  const page = await browser.newPage();
+  page.keepAlive = true; // 脫離 withPage 生命週期，常駐
+  await injectCookieAccept(page);
+  await page.setViewport(currentViewports.scout);
+  scoutPages.set(origin, page);
+  log.info('browser', `[SCOUT] 已建立常駐 fetch 分頁（origin: ${origin}）`);
+  return page;
 }
 
 async function setBrowserVisibility(role = 'scout', visible = true) {
@@ -294,7 +342,7 @@ async function setBrowserVisibility(role = 'scout', visible = true) {
     if (session && windowId !== null) {
       await session.send('Browser.setWindowBounds', {
         windowId,
-        bounds: { left: visible ? 0 : -2000, top: visible ? 0 : -2000, windowState: 'normal' }
+        bounds: { left: visible ? 0 : -2000, top: visible ? 0 : -2000, windowState: 'normal' },
       });
       await session.detach();
     } else {
@@ -310,4 +358,4 @@ async function setAllBrowsersVisibility(visible = true) {
   await setBrowserVisibility('scout', visible);
 }
 
-module.exports = { isBrowserAlive, isInstanceAlive, resetBrowser, triggerAmnesia, withPage, simulateHumanBehavior, setAllBrowsersVisibility };
+module.exports = { isBrowserAlive, isInstanceAlive, resetBrowser, triggerAmnesia, withPage, getScoutPage, simulateHumanBehavior, setAllBrowsersVisibility };

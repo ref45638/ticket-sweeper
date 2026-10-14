@@ -1,7 +1,7 @@
 const config = require('./config/env');
 const sitesStore = require('./config/sites');
 const { scrapeSite } = require('./scrapers');
-const { fetchCaptcha, keepKillerWarm } = require('./scrapers/tixcraft');
+const { fetchCaptcha, keepKillerWarm, refreshScoutSessions } = require('./scrapers/tixcraft');
 const { resetBrowser, triggerAmnesia } = require('./scrapers/browser');
 const state = require('./state');
 const notifier = require('./notifier');
@@ -262,15 +262,21 @@ function stopScheduler() {
 }
 
 /**
- * Killer 保溫排程（方案 A）：定期匿名刷新 Killer 的 Cloudflare 通行。
- * keepKillerWarm 內部會依 warmKiller 開關決定要保溫還是關閉閒置瀏覽器，
- * 所以這個 timer 一律啟動、由設定控制行為。
+ * 背景定期維護（方案 A + 免渲染主動刷新）：以 WARM_INTERVAL_MS 節奏同時做兩件事——
+ *  1. keepKillerWarm：依 warmKiller 開關保溫 Killer 的 Cloudflare 通行或關閉閒置瀏覽器。
+ *  2. refreshScoutSessions：fast 模式下主動刷新常駐 Scout 分頁的 cf_clearance（純 fetch 不會續票），
+ *     避免每隔十幾～三十分鐘就有一輪偵測被動 fallback 變慢甚至錯過開賣瞬間。
+ * 兩者內部各自依設定決定行為，故這個 timer 一律啟動。
  */
 function startKillerWarmer() {
   if (warmTimer) return;
-  // 啟動後稍等再預熱一次，避免和開機其他初始化搶資源
-  setTimeout(() => keepKillerWarm().catch((e) => log.warn('scheduler', `保溫例外: ${e.message}`)), 15_000);
-  warmTimer = setInterval(() => keepKillerWarm().catch((e) => log.warn('scheduler', `保溫例外: ${e.message}`)), WARM_INTERVAL_MS);
+  const tick = () => {
+    keepKillerWarm().catch((e) => log.warn('scheduler', `保溫例外: ${e.message}`));
+    refreshScoutSessions().catch((e) => log.warn('scheduler', `Scout 刷新例外: ${e.message}`));
+  };
+  // 啟動後稍等再跑一次，避免和開機其他初始化搶資源
+  setTimeout(tick, 15_000);
+  warmTimer = setInterval(tick, WARM_INTERVAL_MS);
 }
 
 function stopKillerWarmer() {

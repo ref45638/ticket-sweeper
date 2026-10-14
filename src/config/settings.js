@@ -17,6 +17,8 @@ const DEFAULTS = {
   },
   fetchCaptchaImage: true,
   warmKiller: false,
+  // 偵測策略：'fast'=免渲染 in-context fetch（預設）、'render'=舊渲染偵測（一鍵切回的安全開關）
+  detectionMode: 'fast',
 };
 
 async function readSettings() {
@@ -68,10 +70,13 @@ async function patchSettings(patch) {
   if (patch.warmKiller !== undefined) {
     current.warmKiller = Boolean(patch.warmKiller);
   }
+  if (patch.detectionMode !== undefined) {
+    current.detectionMode = patch.detectionMode === 'render' ? 'render' : 'fast';
+  }
   await writeSettings(current);
   const n = current.notifyEvents || {};
-  const notifyStr = `[有票=${n.ticketFound?'開':'關'}, 手動驗證=${n.cartManualCaptcha?'開':'關'}, 成功=${n.cartSuccess?'開':'關'}, 失敗=${n.cartFailure?'開':'關'}, 錯誤=${n.scraperError?'開':'關'}]`;
-  const msg = `tixuisid=${current.tixuisid ? '***' : '(空)'}, 票數=${current.ticketQuantity}, 離座模式=${current.unattendedMode?'開':'關'}, 保溫Killer=${current.warmKiller?'開':'關'}, 偷抓驗證碼=${current.fetchCaptchaImage?'開':'關'}, 推播=${notifyStr}`;
+  const notifyStr = `[有票=${n.ticketFound ? '開' : '關'}, 手動驗證=${n.cartManualCaptcha ? '開' : '關'}, 成功=${n.cartSuccess ? '開' : '關'}, 失敗=${n.cartFailure ? '開' : '關'}, 錯誤=${n.scraperError ? '開' : '關'}]`;
+  const msg = `tixuisid=${current.tixuisid ? '***' : '(空)'}, 票數=${current.ticketQuantity}, 偵測=${current.detectionMode}, 離座模式=${current.unattendedMode ? '開' : '關'}, 保溫Killer=${current.warmKiller ? '開' : '關'}, 偷抓驗證碼=${current.fetchCaptchaImage ? '開' : '關'}, 推播=${notifyStr}`;
   log.info('settings', `已更新全域設定: ${msg}`);
   return current;
 }

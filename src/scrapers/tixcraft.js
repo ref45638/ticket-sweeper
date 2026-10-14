@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
-const { withPage, simulateHumanBehavior, resetBrowser, isInstanceAlive } = require('./browser');
+const cheerio = require('cheerio');
+const { withPage, getScoutPage, simulateHumanBehavior, resetBrowser, isInstanceAlive } = require('./browser');
 const log = require('../logger');
 const notifier = require('../notifier');
 const settings = require('../config/settings');
@@ -21,11 +22,7 @@ const CAPTCHA_INPUT_SELECTOR = '#TicketForm_verifyCode, input[name*="verify"], i
  * @returns {string|null} 命中的阻擋類型字串；未阻擋時回傳 null
  */
 function detectBlockPage() {
-  if (
-    document.querySelector(
-      '#challenge-running, #challenge-form, .cf-turnstile, iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]'
-    )
-  ) {
+  if (document.querySelector('#challenge-running, #challenge-form, .cf-turnstile, iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]')) {
     return 'cloudflare-challenge';
   }
   const haystack = ((document.title || '') + ' ' + (document.body ? document.body.innerText : '')).toLowerCase();
@@ -164,7 +161,13 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
         await new Promise((r) => setTimeout(r, waitTime));
         break; // finish
       } else {
-        log.warn('tixcraft', `[${siteId}] 被踢出排隊或驗證碼錯誤，目前網址: ${currentUrl}`);
+        // 跳轉到 /login 代表 TIXUISID session cookie 已失效（被登出），與驗證碼無關，且無法重試。
+        const loggedOut = currentUrl.includes('/login');
+        if (loggedOut) {
+          log.warn('tixcraft', `[${siteId}] TIXUISID 已失效（被導向登入頁），無法搶票，目前網址: ${currentUrl}`);
+        } else {
+          log.warn('tixcraft', `[${siteId}] 被踢出排隊或驗證碼錯誤，目前網址: ${currentUrl}`);
+        }
 
         await new Promise((r) => setTimeout(r, 1000));
         const checkSite = await sitesStore.getSiteById(siteId);
@@ -195,8 +198,13 @@ async function monitorQueueAndRetry(page, site, availableSectionName, tixuisid) 
         }
 
         if (!retryable) {
-          log.warn('tixcraft', `[${siteId}] 票已售完或無法重試，終止搶票。`);
-          notifier.sendDirect(`⚠️ [${site.label || '拓元演唱會'}] 重試失敗，票可能已售完。`);
+          if (loggedOut) {
+            log.warn('tixcraft', `[${siteId}] TIXUISID 已失效，終止搶票。請更新設定中的 TIXUISID。`);
+            notifier.sendDirect(`⚠️ [${site.label || '拓元演唱會'}] TIXUISID 已失效（被登出），無法搶票。\n請重新登入拓元、更新設定中的 TIXUISID。`);
+          } else {
+            log.warn('tixcraft', `[${siteId}] 票已售完或無法重試，終止搶票。`);
+            notifier.sendDirect(`⚠️ [${site.label || '拓元演唱會'}] 重試失敗，票可能已售完。`);
+          }
           break;
         }
 
@@ -264,6 +272,116 @@ function summarize(sections) {
     else soldOutCount += 1;
   }
   return { availableCount, soldOutCount, ignoredCount };
+}
+
+/**
+ * Node 端（cheerio）解析 tixcraft 區域列表 HTML 字串，判斷規則與瀏覽器版 parseAreaList
+ * 逐項對齊（可購/售完/熱賣/輪椅），供「免渲染 fetch」偵測使用。
+ * 不含 markRandomAvailable（偵測不需選區，選區由 Killer 走渲染路徑）。
+ *
+ * href 語意差異（重要）：DOM 的 anchor.href 是解析後的絕對 URL，cheerio 的 attr('href')
+ * 是原始屬性值（常為相對路徑），需用 new URL(raw, baseUrl) 轉絕對，parity 與前端顯示才一致。
+ *
+ * @param {string} html 區域頁 HTML 字串
+ * @param {string} baseUrl 用來把相對 href 轉絕對（以 site.url 為準）
+ * @returns {{ sections: Array }}
+ */
+function parseAreaHtml(html, baseUrl) {
+  const $ = cheerio.load(html || '');
+
+  const NAV_BLOCKLIST = /^(Events|My Tickets|Sign In|Menu|Home|Clear|Search)/i;
+  const stripName = (text) =>
+    text
+      .replace(/剩餘\s*\d+/g, '')
+      .replace(/\d+\s*seat\(s\)\s*remaining/gi, '')
+      .replace(/熱賣中|熱銷中/gi, '')
+      .replace(/已售完/gi, '')
+      .replace(/Sold\s*out/gi, '')
+      .trim();
+
+  const listRoots = $('ul.area-list, .zone.area-list');
+  const lis = listRoots.length > 0 ? listRoots.find('li').toArray() : $('li').toArray();
+
+  const sections = [];
+  const seen = new Set();
+
+  for (const el of lis) {
+    const li = $(el);
+    const anchor = li.find('a').first();
+    const hasAnchor = anchor.length > 0;
+    const font = li.find('font').first();
+    const text = (li.text() || '').replace(/\s+/g, ' ').trim();
+    if (!text || NAV_BLOCKLIST.test(text)) continue;
+
+    const id = (hasAnchor && anchor.attr('id')) || null;
+    const isSelectable = (li.attr('class') || '').split(/\s+/).some((c) => c.startsWith('select_form_'));
+    const fontColor = (font.attr('color') || '').toUpperCase();
+    const fontText = (font.text() || '').replace(/\s+/g, ' ').trim();
+
+    let remaining = 0;
+    const remainZh = text.match(/剩餘\s*(\d+)/);
+    const remainEn = text.match(/(\d+)\s*seat\(s\)\s*remaining/i);
+    if (remainZh) remaining = parseInt(remainZh[1], 10);
+    else if (remainEn) remaining = parseInt(remainEn[1], 10);
+
+    const hotSelling = /熱賣中|熱銷中/i.test(text) || /熱賣中|熱銷中/i.test(fontText);
+    const explicitlySoldOut = /已售完/i.test(text) || /Sold\s*out/i.test(text);
+    const graySoldOut = fontColor === '#AAAAAA' && explicitlySoldOut;
+    const soldOut = explicitlySoldOut || graySoldOut || (!hasAnchor && !isSelectable);
+    const available = !soldOut && isSelectable && hasAnchor && (remaining > 0 || hotSelling || fontColor === '#FF0000');
+
+    const name = stripName(text);
+    if (!name || name.length < 2) continue;
+
+    const dedupeKey = `${id || ''}:${name}`;
+    if (seen.has(dedupeKey)) continue;
+    seen.add(dedupeKey);
+
+    let href = null;
+    if (hasAnchor) {
+      const rawHref = anchor.attr('href');
+      if (rawHref) {
+        try {
+          href = new URL(rawHref, baseUrl).href;
+        } catch {
+          href = rawHref;
+        }
+      }
+    }
+
+    sections.push({
+      id,
+      href,
+      name,
+      remaining: Number.isFinite(remaining) && remaining > 0 ? remaining : 0,
+      hotSelling,
+      available,
+      soldOut: !available,
+      clickable: isSelectable && hasAnchor,
+    });
+  }
+
+  return { sections };
+}
+
+/**
+ * 字串版挑戰頁偵測（對應瀏覽器版 detectBlockPage 規則），供免渲染 fetch 後判斷退場用。
+ * @param {string} html
+ * @returns {string|null} 命中的阻擋類型；未阻擋回傳 null
+ */
+function htmlLooksBlocked(html) {
+  const $ = cheerio.load(html || '');
+  if ($('#challenge-running, #challenge-form, .cf-turnstile, iframe[src*="challenges.cloudflare.com"], iframe[title*="Cloudflare"]').length > 0) {
+    return 'cloudflare-challenge';
+  }
+  const haystack = (($('title').text() || '') + ' ' + ($('body').text() || '')).toLowerCase();
+  if (/just a moment|checking your browser|attention required|enable javascript and cookies|verifying you are human/.test(haystack)) {
+    return 'cloudflare-interstitial';
+  }
+  if (/access denied|error 1020|403 forbidden/.test(haystack)) {
+    return 'access-denied';
+  }
+  return null;
 }
 
 /**
@@ -705,6 +823,26 @@ async function gotoAreaPage(page, url) {
   return ready;
 }
 
+/**
+ * 在常駐分頁 context 內用 fetch 抓區域頁 HTML（請求由真實瀏覽器發出，
+ * 自動帶上 cookie + cf_clearance + 正確 TLS/JA3）。
+ * 回傳 { status, html }——退場條件要判斷「非 200」，故必須帶 status。
+ * page.evaluate 本身沒有逾時，fetch 悶死會卡到 protocolTimeout(~180s)，故內建 10s AbortSignal。
+ * 呼叫端必須在此之前先確保分頁 origin 與 url 同源（跨 origin 會 CORS TypeError，讀不到 body）。
+ * @returns {Promise<{ status: number, html: string }>} 失敗（含 CORS/逾時）時回傳 status:0
+ */
+async function fetchAreaHtml(page, url) {
+  return page.evaluate(async (u) => {
+    try {
+      const res = await fetch(u, { credentials: 'include', signal: AbortSignal.timeout(10_000) });
+      const html = await res.text();
+      return { status: res.status, html };
+    } catch (err) {
+      return { status: 0, html: '' };
+    }
+  }, url);
+}
+
 async function scrapeTixcraft(url, site = {}) {
   if (activeCartTasks.has(site.id)) {
     log.info('tixcraft', `[${site.id}] 正在背景排隊搶票中，暫停主輪詢`);
@@ -790,6 +928,128 @@ async function scrapeTixcraft(url, site = {}) {
   };
 }
 
+/**
+ * 真實導航一次（過 CF / 刷新 cf_clearance）並用渲染版 parseAreaList 解析，回傳 rawSections。
+ * 導航後仍拿不到列表：是挑戰頁就 throw（讓 scheduler 的 consecutiveBlocks 計數 → 失憶），
+ * 否則視為目前無票回傳空陣列。供 fast 模式的 origin 不符與 fetch 退場共用。
+ */
+async function navigateAndParse(page, url) {
+  const listReady = await gotoAreaPage(page, url);
+  if (!listReady) {
+    const blockType = await page.evaluate(detectBlockPage).catch(() => null);
+    if (blockType) {
+      log.warn('tixcraft', `[Scout-fast] 導航後偵測到疑似 WAF 阻擋頁：${blockType}`);
+      throw new Error(`WAF blocked: ${blockType}`);
+    }
+    log.warn('tixcraft', '[Scout-fast] 導航後仍無區域列表，視為目前無票');
+    return [];
+  }
+  await simulateHumanBehavior(page);
+  const { sections } = await page.evaluate(parseAreaList);
+  return sections;
+}
+
+/**
+ * 免渲染偵測（Browser as session carrier + in-context fetch）。
+ * 維持常駐、已過 CF 的 per-origin Scout 分頁；每輪不導航，直接在分頁內 fetch 區域頁 HTML
+ * （自動帶 cookie + cf_clearance），Node 端以 cheerio 解析，把每輪偵測從數秒降到亞秒級。
+ * 退場：origin 不符 / fetch 非 200 / 挑戰頁 / 空 body → 真實導航一次刷新 CF，該輪改用渲染解析，下輪回 fetch。
+ * 自動搶票觸發邏輯與 scrapeTixcraft 完全一致（有票且有 tixuisid → fire-and-forget attemptAddToCart）。
+ */
+async function scrapeTixcraftFast(url, site = {}) {
+  if (activeCartTasks.has(site.id)) {
+    log.info('tixcraft', `[${site.id}] 正在背景排隊搶票中，暫停主輪詢`);
+    return {
+      scraperId: 'tixcraft',
+      scrapedAt: new Date().toISOString(),
+      sections: [],
+      summary: { total: 0, availableCount: 0, soldOutCount: 0, ignoredCount: 0 },
+      cartResult: { success: true, message: '背景排隊中' },
+    };
+  }
+
+  const targetOrigin = new URL(url).origin;
+  const page = await getScoutPage(targetOrigin);
+
+  let currentOrigin = null;
+  try {
+    currentOrigin = new URL(page.url()).origin;
+  } catch {}
+
+  let rawSections;
+  let mode = 'fast-fetch';
+
+  if (currentOrigin !== targetOrigin) {
+    // 跨 origin 的 fetch 在 CORS 下會直接 TypeError（讀不到 body），故不能靠 fetch 失敗才退回：
+    // fetch 前先比對 origin，不符就先真實導航落在正確 origin（也順便過 CF）。
+    log.info('tixcraft', `[Scout-fast] 分頁 origin=${currentOrigin || 'blank'} 與目標 ${targetOrigin} 不符 → 先真實導航`);
+    rawSections = await navigateAndParse(page, url);
+    mode = 'render-nav';
+  } else {
+    const { status, html } = await fetchAreaHtml(page, url);
+    const blockType = htmlLooksBlocked(html);
+    if (status !== 200 || !html || blockType) {
+      log.warn('tixcraft', `[Scout-fast] fetch 退場 (status=${status}, block=${blockType || (!html ? 'empty-body' : 'no')}) → 真實導航刷新 CF`);
+      rawSections = await navigateAndParse(page, url);
+      mode = 'render-fallback';
+    } else {
+      rawSections = parseAreaHtml(html, url).sections;
+    }
+  }
+
+  const sections = rawSections.map(classifySection).sort((a, b) => {
+    const order = { available: 0, soldOut: 1, ignored: 2 };
+    return (order[a.status] ?? 9) - (order[b.status] ?? 9);
+  });
+
+  const summary = summarize(sections);
+
+  // === 自動加車邏輯（與 scrapeTixcraft 一致，僅多帶 mode 供 log）===
+  let cartResult = null;
+  const globalSettings = await settings.getSettings();
+  const tixuisid = globalSettings.tixuisid;
+  const ticketQuantity = globalSettings.ticketQuantity || 1;
+  if (summary.availableCount > 0 && tixuisid) {
+    if (activeCartTasks.has(site.id)) {
+      log.info('tixcraft', `[Scout-fast] Killer 正在為 ${site.label} 搶票中，略過本次重複加車...`);
+      cartResult = null;
+    } else {
+      log.info('tixcraft', `🎯 [${mode}] 偵測到有票，交由殺手 (Killer) 開啟網頁隨機選區（目標 ${ticketQuantity} 張）...`);
+      attemptAddToCart({ ...site, tixuisid, ticketQuantity })
+        .then((res) => {
+          if (res && res.message) log.info('tixcraft', `加車結果: ${res.message}`);
+        })
+        .catch((err) => {
+          log.error('tixcraft', `加車流程例外: ${err.message}`);
+        });
+      cartResult = { success: true, message: '已移交殺手進程處理' };
+    }
+  } else if (summary.availableCount === 0 && tixuisid) {
+    log.info('tixcraft', `[Scout-fast] 無可用票區（${mode}），維持匿名輪詢`);
+  }
+
+  return {
+    scraperId: 'tixcraft',
+    scrapedAt: new Date().toISOString(),
+    sections,
+    summary,
+    cartResult,
+  };
+}
+
+/**
+ * 依 detectionMode 分派偵測策略（一鍵切換的安全開關）：
+ *   'render' → 舊的渲染偵測 scrapeTixcraft（退路）
+ *   其他（預設 'fast'）→ 免渲染 scrapeTixcraftFast
+ */
+async function scrapeTixcraftAuto(url, site = {}) {
+  let mode = 'fast';
+  try {
+    mode = (await settings.getSettings()).detectionMode || 'fast';
+  } catch {}
+  return mode === 'render' ? scrapeTixcraft(url, site) : scrapeTixcraftFast(url, site);
+}
+
 async function fetchCaptcha() {
   try {
     const captchaBaseDir = path.join(__dirname, '../../captchas');
@@ -816,6 +1076,45 @@ async function fetchCaptcha() {
 
 function matches(url) {
   return /tixcraft\.com\/ticket\/area\//i.test(url);
+}
+
+/**
+ * 主動定期刷新常駐 Scout 分頁的 cf_clearance（方案：主動刷新 > 被動 fallback）。
+ * cf_clearance 壽命常見十幾～三十分鐘、純 fetch 不會續票；若只靠被動 fallback，每隔一段時間就有一輪
+ * 偵測變慢甚至漏掉（秒殺可能剛好錯過開賣瞬間）。故對每個啟用站點的 origin 取常駐分頁真實導航一次刷新。
+ * - 搶票進行中不打擾。
+ * - render 模式每輪都導航，無需額外刷新。
+ * 由 scheduler 以 WARM_INTERVAL_MS 節奏呼叫。
+ */
+async function refreshScoutSessions() {
+  if (activeCartTasks.size > 0) return;
+
+  let mode = 'fast';
+  try {
+    mode = (await settings.getSettings()).detectionMode || 'fast';
+  } catch {}
+  if (mode === 'render') return;
+
+  const sites = await sitesStore.listEnabledSites().catch(() => []);
+  const seen = new Set();
+  for (const site of sites) {
+    let origin;
+    try {
+      origin = new URL(site.url).origin;
+    } catch {
+      continue;
+    }
+    if (seen.has(origin)) continue;
+    seen.add(origin);
+
+    try {
+      const page = await getScoutPage(origin);
+      await gotoAreaPage(page, site.url); // 真實導航刷新 cf_clearance，落在正確 origin 供下輪 fetch
+      log.info('tixcraft', `[Scout-fast] 已主動刷新常駐分頁 cf_clearance（${origin}）`);
+    } catch (err) {
+      log.warn('tixcraft', `[Scout-fast] 主動刷新常駐分頁失敗（${origin}）: ${err.message}`);
+    }
+  }
 }
 
 /**
@@ -858,11 +1157,17 @@ async function keepKillerWarm() {
 
 module.exports = {
   scrapeTixcraft,
+  scrapeTixcraftFast,
+  scrapeTixcraftAuto,
   fetchCaptcha,
   matches,
   keepKillerWarm,
+  refreshScoutSessions,
   // 匯出供測試使用
   parseAreaList,
+  parseAreaHtml,
+  htmlLooksBlocked,
+  fetchAreaHtml,
   detectBlockPage,
   gotoAreaPage,
   CAPTCHA_IMG_SELECTOR,

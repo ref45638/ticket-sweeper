@@ -5,7 +5,8 @@ const scrapers = [
     id: 'tixcraft',
     label: '拓元 / tixcraft',
     matches: tixcraft.matches,
-    scrape: tixcraft.scrapeTixcraft,
+    // 依 detectionMode 分派：fast(免渲染 fetch，預設) / render(舊渲染，退路)
+    scrape: tixcraft.scrapeTixcraftAuto,
   },
 ];
 
