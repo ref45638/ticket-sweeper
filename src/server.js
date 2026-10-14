@@ -4,13 +4,12 @@ const apiRouter = require('./routes/api');
 const webRouter = require('./routes/web');
 const scheduler = require('./scheduler');
 const log = require('./logger');
+const telegramBot = require('./telegram/bot');
 
 const app = express();
 
 const webhookRouter = require('./routes/webhook');
-const telegramWebhookRouter = require('./routes/telegramWebhook');
 app.use('/api/webhook', webhookRouter);
-app.use('/api/telegram_webhook', telegramWebhookRouter);
 
 app.use(express.json());
 app.use('/api', apiRouter);
@@ -39,14 +38,17 @@ const server = app.listen(config.port, async () => {
       log.info('server', `ngrok 已經啟動，您的 LINE Webhook URL 網址為：${listener.url()}/api/webhook`);
       log.info('server', `請將上方網址貼至 LINE Developers Console 的 Webhook URL 欄位並開啟 Use webhook。`);
       
-      if (config.telegram.enabled()) {
-        const tgUrl = `https://api.telegram.org/bot${config.telegram.botToken}/setWebhook?url=${listener.url()}/api/telegram_webhook`;
-        const res = await fetch(tgUrl);
-        const data = await res.json();
-        if (data.ok) {
-          log.info('server', `已成功自動註冊 Telegram Webhook`);
-        } else {
-          log.error('server', `Telegram Webhook 註冊失敗: ${JSON.stringify(data)}`);
+      // 用 Telegraf 註冊 Telegram Webhook
+      if (config.telegram.botToken) {
+        try {
+          const webhookUrl = `${listener.url()}/api/telegram_webhook`;
+          const handler = await telegramBot.launchWebhook(webhookUrl);
+          if (handler) {
+            app.use('/api/telegram_webhook', handler);
+            log.info('server', '已成功透過 Telegraf 註冊 Telegram Webhook');
+          }
+        } catch (e) {
+          log.error('server', `Telegram Webhook 註冊失敗: ${e.message}`);
         }
       }
     } catch (e) {
@@ -59,6 +61,7 @@ const server = app.listen(config.port, async () => {
 
 function shutdown() {
   log.info('server', '正在關閉…');
+  telegramBot.stop();
   scheduler.stopScheduler();
   server.close(() => process.exit(0));
 }
