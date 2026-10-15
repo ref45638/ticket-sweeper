@@ -2,7 +2,7 @@ const express = require('express');
 const sitesStore = require('../config/sites');
 const state = require('../state');
 const scheduler = require('../scheduler');
-const { isBrowserAlive } = require('../scrapers/browser');
+const { isInstanceAlive } = require('../scrapers/browser');
 const notifier = require('../notifier');
 const { listScraperIds } = require('../scrapers');
 const settings = require('../config/settings');
@@ -25,7 +25,8 @@ router.get('/status', async (_req, res) => {
     scrapeIntervalMs: meta.scrapeIntervalMs ?? null,
     scheduleMode: meta.scheduleMode ?? 'interval',
     lastError: meta.lastError,
-    browserAlive: await isBrowserAlive(),
+    // 只檢查不啟動：isBrowserAlive 會在沒有實例時自動開瀏覽器，Web UI 輪詢狀態就會把用不到的 Scout 帶起來
+    browserAlive: isInstanceAlive(),
     sitesCount: sites.length,
     enabledSitesCount: enabledCount,
     notifications: notifier.getChannelStatus(),
@@ -42,11 +43,7 @@ router.get('/results', async (req, res) => {
   if (NOW - lastNotified >= SECTION_COOLDOWN_BUFFER_MS) {
     lastNotified = NOW;
 
-    const ip =
-      (req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : '') ||
-      req.ip ||
-      req.socket?.remoteAddress ||
-      '';
+    const ip = (req.headers['x-forwarded-for'] ? String(req.headers['x-forwarded-for']).split(',')[0].trim() : '') || req.ip || req.socket?.remoteAddress || '';
     const ua = req.headers['user-agent'] || '';
 
     res.on('finish', () => {
