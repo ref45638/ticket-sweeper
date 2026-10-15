@@ -1,7 +1,7 @@
 const config = require('./config/env');
 const sitesStore = require('./config/sites');
-const { scrapeSite } = require('./scrapers');
-const { fetchCaptcha, keepKillerWarm, refreshScoutSessions } = require('./scrapers/tixcraft');
+const { scrapeSite, resolveScraper } = require('./scrapers');
+const { fetchCaptcha, keepKillerWarm, refreshScoutSessions, isTixcraftSite } = require('./scrapers/tixcraft');
 const { resetBrowser, triggerAmnesia } = require('./scrapers/browser');
 const state = require('./state');
 const notifier = require('./notifier');
@@ -28,15 +28,25 @@ const QUIET_INTERVAL_MS = 300_000; // 5 分鐘
 const JITTER_RANGE_MS = 15_000;
 
 /**
- * 計算下一次執行的延遲毫秒數。
- * - 正常時段：baseInterval ± 15 秒隨機 jitter
- * - 凌晨 03~09：5 分鐘 ± 15 秒
+ * 遠大獨立輪詢間隔：走純 HTTP 公開 API、成本低，而清票常在幾十秒內被搶光，故比拓元主輪詢
+ * （SCRAPE_INTERVAL_MS）密；凌晨 03~09 一樣降頻。
  */
-function getNextDelay() {
+let ticketplusTimeoutId = null;
+const TICKETPLUS_INTERVAL_MS = 15_000;
+const TICKETPLUS_JITTER_MS = 5_000;
+
+const isTicketplusSite = (site) => resolveScraper(site.url, site.scraperId)?.id === 'ticketplus';
+
+/**
+ * 計算下一次執行的延遲毫秒數（預設為拓元主輪詢的參數，遠大獨立輪詢另傳較短的間隔與 jitter）。
+ * - 正常時段：normalMs ± jitterMs 隨機 jitter
+ * - 凌晨 03~09：5 分鐘 ± jitterMs
+ */
+function getNextDelay(normalMs = config.scrapeIntervalMs, jitterMs = JITTER_RANGE_MS) {
   const hour = new Date().getHours();
   const isQuiet = hour >= QUIET_HOUR_START && hour < QUIET_HOUR_END;
-  const baseMs = isQuiet ? QUIET_INTERVAL_MS : config.scrapeIntervalMs;
-  const jitter = Math.floor(Math.random() * JITTER_RANGE_MS * 2) - JITTER_RANGE_MS;
+  const baseMs = isQuiet ? QUIET_INTERVAL_MS : normalMs;
+  const jitter = Math.floor(Math.random() * jitterMs * 2) - jitterMs;
   return Math.max(10_000, baseMs + jitter); // 最少 10 秒
 }
 
@@ -159,7 +169,7 @@ async function scrapeOneSite(site) {
       // ignore
     }
 
-    return { siteId: site.id, ok: false, error: err.message };
+    return { siteId: site.id, ok: false, error: err.message, isTixcraft: isTixcraftSite(site) };
   }
 }
 
@@ -181,10 +191,12 @@ async function runScrapeCycle() {
 
   const outcomes = [];
   try {
-    const sites = await sitesStore.listEnabledSites();
-    log.info('scheduler', `啟用站點數: ${sites.length}`);
+    const allSites = await sitesStore.listEnabledSites();
+    // 遠大站點由 runTicketplusCycle 以較短間隔另行輪詢，這裡只跑拓元等其他站
+    const sites = allSites.filter((s) => !isTicketplusSite(s));
+    log.info('scheduler', `啟用站點數: ${sites.length}（遠大 ${allSites.length - sites.length} 個另行輪詢）`);
 
-    if (sites.length === 0) {
+    if (allSites.length === 0) {
       log.warn('scheduler', '沒有啟用的監控站點');
     }
 
@@ -219,8 +231,8 @@ async function runScrapeCycle() {
 
     log.info('scheduler', `輪詢週期結束 (${elapsed}s) — 成功 ${ok}/${outcomes.length}`);
 
-    // 檢查是否有被 WAF 阻擋的情況
-    const blocked = outcomes.some((o) => !o.ok && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error));
+    // 檢查是否有被 WAF 阻擋的情況（只算拓元站：失憶的是拓元 Scout，遠大等其他站的錯誤與它無關）
+    const blocked = outcomes.some((o) => !o.ok && o.isTixcraft && o.error && /403|turnstile|access denied|cloudflare|blocked/i.test(o.error));
 
     if (blocked) {
       consecutiveBlocks++;
@@ -248,7 +260,11 @@ function startScheduler() {
   const stepMin = config.scrapeIntervalMs / 60_000;
   log.info('scheduler', `排程啟動（隨機 jitter），基礎間隔 ${stepMin >= 1 && Number.isInteger(stepMin) ? `${stepMin} 分鐘` : `${config.scrapeIntervalMs / 1000} 秒`}，凌晨 03~09 降頻 5 分鐘`);
 
+  log.info('scheduler', `遠大獨立輪詢 ${TICKETPLUS_INTERVAL_MS / 1000}±${TICKETPLUS_JITTER_MS / 1000} 秒，凌晨 03~09 同樣降頻 5 分鐘`);
+
   scheduleNextTick();
+  scheduleTicketplusTick();
+  scheduleDailyReport();
   startKillerWarmer();
 }
 
@@ -258,7 +274,85 @@ function stopScheduler() {
     timeoutId = null;
     log.info('scheduler', '排程已停止');
   }
+  if (ticketplusTimeoutId) {
+    clearTimeout(ticketplusTimeoutId);
+    ticketplusTimeoutId = null;
+  }
+  if (reportTimeoutId) {
+    clearTimeout(reportTimeoutId);
+    reportTimeoutId = null;
+  }
   stopKillerWarmer();
+}
+
+/** 每天固定時點（本機時區）推播監控統整報告，沒票時也發，讓人知道服務還活著 */
+const REPORT_HOURS = [9, 21];
+let reportTimeoutId = null;
+let statsAtLastReport = state.getStats();
+
+function scheduleDailyReport() {
+  const now = new Date();
+  const next = REPORT_HOURS.map((h) => {
+    const d = new Date(now);
+    d.setHours(h, 0, 0, 0);
+    if (d <= now) d.setDate(d.getDate() + 1);
+    return d;
+  }).sort((a, b) => a - b)[0];
+
+  reportTimeoutId = setTimeout(() => {
+    sendDailyReport()
+      .catch((err) => log.error('scheduler', '統整報告發送失敗', err.message))
+      .finally(() => {
+        if (reportTimeoutId) scheduleDailyReport();
+      });
+  }, next - now);
+}
+
+async function sendDailyReport() {
+  const stats = state.getStats();
+  const checks = stats.scrapesTotal - statsAtLastReport.scrapesTotal;
+  const errors = stats.scrapesError - statsAtLastReport.scrapesError;
+  statsAtLastReport = stats;
+
+  const time = (iso) => (iso ? new Date(iso).toLocaleTimeString('zh-TW', { hour12: false, hour: '2-digit', minute: '2-digit' }) : '—');
+  const results = state.getAllResults();
+  const lines = results.map((r, i) => {
+    const prefix = i === results.length - 1 ? '└ ' : '├ ';
+    const status = r.error ? `⚠️ 錯誤：${r.error}` : r.summary?.availableCount > 0 ? `🎫 可購 ${r.summary.availableCount} 區` : '售完';
+    return `${prefix}${r.label}：${status}（最後檢查 ${time(r.lastScrapedAt)}）`;
+  });
+
+  const header = `📊 監控統整報告（${new Date().toLocaleString('zh-TW', { hour12: false, month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' })}）`;
+  const body = lines.length ? lines.join('\n') : '（目前沒有監控中的活動）';
+  await notifier.sendDirect(`${header}\n\n服務運作中，距上次報告共檢查 ${checks} 次、失敗 ${errors} 次\n\n${body}`);
+  log.info('scheduler', '已發送統整報告');
+}
+
+/**
+ * 遠大獨立輪詢：與拓元主輪詢並行、互不阻塞，只做偵測與通知（scrapeOneSite），沒有加車、WAF 失憶等拓元專屬流程。
+ * 下一輪在本輪結束後才排，故不會重疊；停止排程後（ticketplusTimeoutId 被清空）不再續排。
+ * 為免洗版不印週期 log，逐站結果仍由 scrapeOneSite 記錄。
+ */
+function scheduleTicketplusTick() {
+  ticketplusTimeoutId = setTimeout(
+    () => {
+      runTicketplusCycle()
+        .catch((err) => log.error('scheduler', '遠大輪詢錯誤', err.message))
+        .finally(() => {
+          if (ticketplusTimeoutId) scheduleTicketplusTick();
+        });
+    },
+    getNextDelay(TICKETPLUS_INTERVAL_MS, TICKETPLUS_JITTER_MS)
+  );
+}
+
+async function runTicketplusCycle() {
+  const sites = (await sitesStore.listEnabledSites()).filter(isTicketplusSite);
+  for (const site of sites) {
+    const { ok } = await scrapeOneSite(site);
+    state.recordStat('scrapesTotal');
+    state.recordStat(ok ? 'scrapesSuccess' : 'scrapesError');
+  }
 }
 
 /**

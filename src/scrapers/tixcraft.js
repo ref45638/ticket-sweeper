@@ -1078,10 +1078,15 @@ function matches(url) {
   return /tixcraft\.com\/ticket\/area\//i.test(url);
 }
 
+/** 拓元站點（含子網域）才需要 Scout/Killer 的 Cloudflare 維護與 WAF 失憶；遠大等其他站走純 HTTP，不能混進來 */
+function isTixcraftSite(site) {
+  return /tixcraft\.com/i.test(site.url || '');
+}
+
 /**
  * 主動定期刷新常駐 Scout 分頁的 cf_clearance（方案：主動刷新 > 被動 fallback）。
  * cf_clearance 壽命常見十幾～三十分鐘、純 fetch 不會續票；若只靠被動 fallback，每隔一段時間就有一輪
- * 偵測變慢甚至漏掉（秒殺可能剛好錯過開賣瞬間）。故對每個啟用站點的 origin 取常駐分頁真實導航一次刷新。
+ * 偵測變慢甚至漏掉（秒殺可能剛好錯過開賣瞬間）。故對每個啟用拓元站點的 origin 取常駐分頁真實導航一次刷新。
  * - 搶票進行中不打擾。
  * - render 模式每輪都導航，無需額外刷新。
  * 由 scheduler 以 WARM_INTERVAL_MS 節奏呼叫。
@@ -1095,7 +1100,7 @@ async function refreshScoutSessions() {
   } catch {}
   if (mode === 'render') return;
 
-  const sites = await sitesStore.listEnabledSites().catch(() => []);
+  const sites = (await sitesStore.listEnabledSites().catch(() => [])).filter(isTixcraftSite);
   const seen = new Set();
   for (const site of sites) {
     let origin;
@@ -1122,7 +1127,7 @@ async function refreshScoutSessions() {
  * 讓真正搶票時免去冷啟動的 ~14s（暖態實測約 0.8s）。由 scheduler 定時呼叫。
  * - 搶票進行中不打擾。
  * - warmKiller 關閉時：若仍有閒置的 killer 瀏覽器醒著，順手關掉釋放資源。
- * - 暖的是「第一個啟用站點的 host」（cf_clearance 多為 per-host），最貼近搶票目標。
+ * - 暖的是「第一個啟用拓元站點的 host」（cf_clearance 多為 per-host），最貼近搶票目標。
  */
 async function keepKillerWarm() {
   if (activeCartTasks.size > 0) return; // 搶票進行中，別打擾
@@ -1140,7 +1145,7 @@ async function keepKillerWarm() {
     return;
   }
 
-  const sites = await sitesStore.listEnabledSites().catch(() => []);
+  const sites = (await sitesStore.listEnabledSites().catch(() => [])).filter(isTixcraftSite);
   const warmUrl = sites[0]?.url || 'https://tixcraft.com/';
 
   try {
@@ -1161,6 +1166,7 @@ module.exports = {
   scrapeTixcraftAuto,
   fetchCaptcha,
   matches,
+  isTixcraftSite,
   keepKillerWarm,
   refreshScoutSessions,
   // 匯出供測試使用
