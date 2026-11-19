@@ -27,12 +27,19 @@ function parseOrderUrl(url) {
 }
 
 async function getJson(url) {
-  const res = await fetch(url, {
-    headers: { 'user-agent': UA },
-    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-  });
-  if (!res.ok) throw new Error(`遠大 API HTTP ${res.status}（${new URL(url).pathname}）`);
-  return res.json();
+  const { pathname } = new URL(url);
+  try {
+    const res = await fetch(url, {
+      headers: { 'user-agent': UA },
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    });
+    if (!res.ok) throw new Error(`遠大 API HTTP ${res.status}（${pathname}）`);
+    return await res.json();
+  } catch (e) {
+    // AbortSignal.timeout 的訊息不含網址，補上是哪支 API 逾時（get 回源偶發超過 10 秒）
+    if (e.name === 'TimeoutError') throw new Error(`遠大 API 逾時 ${FETCH_TIMEOUT_MS / 1000} 秒（${pathname}）`);
+    throw e;
+  }
 }
 
 /**

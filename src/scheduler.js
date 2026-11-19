@@ -33,6 +33,13 @@ const TICKETPLUS_JITTER_MS = 5_000;
 
 const isTicketplusSite = (site) => resolveScraper(site.url, site.scraperId)?.id === 'ticketplus';
 
+/**
+ * 同一站連續失敗達門檻才推播錯誤（只在剛好達到時推一次，成功一次就歸零）。
+ * 像遠大回源偶發逾時這種單次失敗，下一輪通常就恢復，不必每次都推。
+ */
+const ERROR_NOTIFY_THRESHOLD = 3;
+const consecutiveErrors = new Map(); // siteId → 連續失敗次數
+
 /** 是否落在降頻時段（本機時區整點）。起訖相同=不降頻；起 > 訖=跨午夜（例：23→6） */
 function isQuietHour(s, hour = new Date().getHours()) {
   const start = s.quietStartHour;
@@ -95,6 +102,7 @@ async function scrapeOneSite(site) {
 
   try {
     const result = await scrapeSite(site);
+    consecutiveErrors.delete(site.id);
     state.setSiteResult(site.id, {
       label: site.label,
       url: site.url,
@@ -150,7 +158,9 @@ async function scrapeOneSite(site) {
 
     return { siteId: site.id, ok: true };
   } catch (err) {
-    log.error('scraper', `失敗: ${site.label}`, err.message);
+    const failCount = (consecutiveErrors.get(site.id) || 0) + 1;
+    consecutiveErrors.set(site.id, failCount);
+    log.error('scraper', `失敗: ${site.label}（連續 ${failCount} 次）`, err.message);
     state.setSiteResult(site.id, {
       label: site.label,
       url: site.url,
@@ -161,14 +171,15 @@ async function scrapeOneSite(site) {
       summary: { availableCount: 0, soldOutCount: 0, ignoredCount: 0 },
     });
 
-    try {
-      const globalSettings = await settings.getSettings();
-      if (globalSettings.notifyEvents && globalSettings.notifyEvents.scraperError !== false) {
-        // 為了避免太過頻繁通知，這裡其實可以做冷卻，但暫時直接送
-        await notifier.sendDirect(`⚠️ 爬蟲發生錯誤\n\n活動：${site.label}\n錯誤：${err.message}`);
+    if (failCount === ERROR_NOTIFY_THRESHOLD) {
+      try {
+        const globalSettings = await settings.getSettings();
+        if (globalSettings.notifyEvents && globalSettings.notifyEvents.scraperError !== false) {
+          await notifier.sendDirect(`⚠️ 爬蟲連續 ${failCount} 次發生錯誤\n\n活動：${site.label}\n錯誤：${err.message}`);
+        }
+      } catch (e) {
+        // ignore
       }
-    } catch (e) {
-      // ignore
     }
 
     return { siteId: site.id, ok: false, error: err.message, isTixcraft: isTixcraftSite(site) };
