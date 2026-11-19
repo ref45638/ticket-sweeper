@@ -146,6 +146,19 @@ router.get('/settings', async (_req, res) => {
     fetchCaptchaImage: data.fetchCaptchaImage !== false,
     unattendedMode: Boolean(data.unattendedMode),
     warmKiller: Boolean(data.warmKiller),
+    scrapeIntervalMs: data.scrapeIntervalMs,
+    ticketplusIntervalMs: data.ticketplusIntervalMs,
+    quietStartHour: data.quietStartHour,
+    quietEndHour: data.quietEndHour,
+    quietIntervalMs: data.quietIntervalMs,
+    // 設定頁輸入框的 placeholder 用
+    scheduleDefaults: {
+      scrapeIntervalMs: settings.DEFAULTS.scrapeIntervalMs,
+      ticketplusIntervalMs: settings.DEFAULTS.ticketplusIntervalMs,
+      quietStartHour: settings.DEFAULTS.quietStartHour,
+      quietEndHour: settings.DEFAULTS.quietEndHour,
+      quietIntervalMs: settings.DEFAULTS.quietIntervalMs,
+    },
   });
 });
 
@@ -159,6 +172,11 @@ router.patch('/settings', async (req, res) => {
     fetchCaptchaImage: data.fetchCaptchaImage !== false,
     unattendedMode: Boolean(data.unattendedMode),
     warmKiller: Boolean(data.warmKiller),
+    scrapeIntervalMs: data.scrapeIntervalMs,
+    ticketplusIntervalMs: data.ticketplusIntervalMs,
+    quietStartHour: data.quietStartHour,
+    quietEndHour: data.quietEndHour,
+    quietIntervalMs: data.quietIntervalMs,
   });
 });
 

@@ -1,4 +1,3 @@
-const config = require('./config/env');
 const sitesStore = require('./config/sites');
 const { scrapeSite, resolveScraper } = require('./scrapers');
 const { fetchCaptcha, keepKillerWarm, refreshScoutSessions, isTixcraftSite } = require('./scrapers/tixcraft');
@@ -19,40 +18,43 @@ function randomDelay(minMs = 3000, maxMs = 5000) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-/** 凌晨 03:00~09:00 降頻區間（本機時區） */
-const QUIET_HOUR_START = 3;
-const QUIET_HOUR_END = 9;
-const QUIET_INTERVAL_MS = 300_000; // 5 分鐘
-
-/** jitter 範圍（±秒） */
+/**
+ * 間隔與降頻時段都來自設定頁（settings.json），每輪排下一次時重讀，改完下一輪就生效。
+ * jitter 範圍（±毫秒）維持固定。
+ */
 const JITTER_RANGE_MS = 15_000;
 
 /**
- * 遠大獨立輪詢間隔：走純 HTTP 公開 API、成本低，而清票常在幾十秒內被搶光，故比拓元主輪詢
- * （SCRAPE_INTERVAL_MS）密；凌晨 03~09 一樣降頻。
+ * 遠大獨立輪詢：走純 HTTP 公開 API、成本低，而清票常在幾十秒內被搶光，故預設比拓元主輪詢密；
+ * 降頻時段一樣降頻。
  */
 let ticketplusTimeoutId = null;
-const TICKETPLUS_INTERVAL_MS = 15_000;
 const TICKETPLUS_JITTER_MS = 5_000;
 
 const isTicketplusSite = (site) => resolveScraper(site.url, site.scraperId)?.id === 'ticketplus';
 
+/** 是否落在降頻時段（本機時區整點）。起訖相同=不降頻；起 > 訖=跨午夜（例：23→6） */
+function isQuietHour(s, hour = new Date().getHours()) {
+  const start = s.quietStartHour;
+  const end = s.quietEndHour;
+  if (start === end) return false;
+  return start < end ? hour >= start && hour < end : hour >= start || hour < end;
+}
+
+const quietText = (s) => (s.quietStartHour === s.quietEndHour ? '不降頻' : `${String(s.quietStartHour).padStart(2, '0')}~${String(s.quietEndHour).padStart(2, '0')} 降頻 ${s.quietIntervalMs / 1000} 秒`);
+
 /**
- * 計算下一次執行的延遲毫秒數（預設為拓元主輪詢的參數，遠大獨立輪詢另傳較短的間隔與 jitter）。
- * - 正常時段：normalMs ± jitterMs 隨機 jitter
- * - 凌晨 03~09：5 分鐘 ± jitterMs
+ * 計算下一次執行的延遲毫秒數（拓元主輪詢與遠大獨立輪詢各傳自己的間隔與 jitter）。
+ * - 一般時段：normalMs ± jitterMs 隨機 jitter
+ * - 降頻時段：s.quietIntervalMs ± jitterMs
  */
-function getNextDelay(normalMs = config.scrapeIntervalMs, jitterMs = JITTER_RANGE_MS) {
-  const hour = new Date().getHours();
-  const isQuiet = hour >= QUIET_HOUR_START && hour < QUIET_HOUR_END;
-  const baseMs = isQuiet ? QUIET_INTERVAL_MS : normalMs;
+function getNextDelay(normalMs, jitterMs, s) {
+  const baseMs = isQuietHour(s) ? s.quietIntervalMs : normalMs;
   const jitter = Math.floor(Math.random() * jitterMs * 2) - jitterMs;
   return Math.max(10_000, baseMs + jitter); // 最少 10 秒
 }
 
-function publishNextRun(nextDate, actualIntervalMs) {
-  const hour = new Date().getHours();
-  const isQuiet = hour >= QUIET_HOUR_START && hour < QUIET_HOUR_END;
+function publishNextRun(nextDate, actualIntervalMs, isQuiet) {
   state.setSchedulerMeta({
     nextRunAt: nextDate.toISOString(),
     scrapeIntervalMs: actualIntervalMs,
@@ -61,19 +63,19 @@ function publishNextRun(nextDate, actualIntervalMs) {
   return nextDate;
 }
 
-function scheduleNextTick() {
+async function scheduleNextTick() {
   if (timeoutId) {
     clearTimeout(timeoutId);
     timeoutId = null;
   }
 
-  const delayMs = getNextDelay();
+  const s = await settings.getSettings();
+  const isQuiet = isQuietHour(s);
+  const delayMs = getNextDelay(s.scrapeIntervalMs, JITTER_RANGE_MS, s);
   const next = new Date(Date.now() + delayMs);
-  publishNextRun(next, delayMs);
+  publishNextRun(next, delayMs, isQuiet);
 
-  const hour = new Date().getHours();
-  const isQuiet = hour >= QUIET_HOUR_START && hour < QUIET_HOUR_END;
-  log.info('scheduler', `下次輪詢 ${next.toLocaleString('zh-TW', { hour12: false })}（${Math.ceil(delayMs / 1000)} 秒後）${isQuiet ? '（降頻模式 03~09）' : ''}`);
+  log.info('scheduler', `下次輪詢 ${next.toLocaleString('zh-TW', { hour12: false })}（${Math.ceil(delayMs / 1000)} 秒後）${isQuiet ? `（降頻模式 ${quietText(s)}）` : ''}`);
 
   timeoutId = setTimeout(() => {
     timeoutId = null;
@@ -257,10 +259,9 @@ async function runScrapeCycle() {
 function startScheduler() {
   if (timeoutId) return;
 
-  const stepMin = config.scrapeIntervalMs / 60_000;
-  log.info('scheduler', `排程啟動（隨機 jitter），基礎間隔 ${stepMin >= 1 && Number.isInteger(stepMin) ? `${stepMin} 分鐘` : `${config.scrapeIntervalMs / 1000} 秒`}，凌晨 03~09 降頻 5 分鐘`);
-
-  log.info('scheduler', `遠大獨立輪詢 ${TICKETPLUS_INTERVAL_MS / 1000}±${TICKETPLUS_JITTER_MS / 1000} 秒，凌晨 03~09 同樣降頻 5 分鐘`);
+  settings.getSettings().then((s) => {
+    log.info('scheduler', `排程啟動（隨機 jitter）：拓元 ${s.scrapeIntervalMs / 1000}±${JITTER_RANGE_MS / 1000} 秒、遠大 ${s.ticketplusIntervalMs / 1000}±${TICKETPLUS_JITTER_MS / 1000} 秒，${quietText(s)}（設定頁可調，下一輪生效）`);
+  });
 
   scheduleNextTick();
   scheduleTicketplusTick();
@@ -333,7 +334,8 @@ async function sendDailyReport() {
  * 下一輪在本輪結束後才排，故不會重疊；停止排程後（ticketplusTimeoutId 被清空）不再續排。
  * 為免洗版不印週期 log，逐站結果仍由 scrapeOneSite 記錄。
  */
-function scheduleTicketplusTick() {
+async function scheduleTicketplusTick() {
+  const s = await settings.getSettings();
   ticketplusTimeoutId = setTimeout(
     () => {
       runTicketplusCycle()
@@ -342,7 +344,7 @@ function scheduleTicketplusTick() {
           if (ticketplusTimeoutId) scheduleTicketplusTick();
         });
     },
-    getNextDelay(TICKETPLUS_INTERVAL_MS, TICKETPLUS_JITTER_MS)
+    getNextDelay(s.ticketplusIntervalMs, TICKETPLUS_JITTER_MS, s)
   );
 }
 
@@ -392,4 +394,5 @@ module.exports = {
   stopScheduler,
   scrapeSiteById,
   isScrapeInProgress: () => scrapeInProgress,
+  isQuietHour,
 };

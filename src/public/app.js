@@ -66,7 +66,7 @@ const api = {
     const res = await fetch('/api/browser/visibility', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ visible })
+      body: JSON.stringify({ visible }),
     });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || 'Failed to toggle visibility');
@@ -109,11 +109,7 @@ function formatTime(iso) {
 }
 
 function escapeHtml(str) {
-  return String(str)
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;');
+  return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 // ===== TAB 切換 =====
@@ -188,9 +184,7 @@ const render = {
 
     const select = $('#scraper-select');
     if (status.scrapers?.length && select.options.length <= 1) {
-      select.innerHTML = status.scrapers
-        .map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`)
-        .join('');
+      select.innerHTML = status.scrapers.map((s) => `<option value="${escapeHtml(s.id)}">${escapeHtml(s.label)}</option>`).join('');
     }
   },
 
@@ -204,9 +198,7 @@ const render = {
 
     if (settings.hasTixuisid) {
       // 顯示遮罩值
-      const masked = settings.tixuisid.length > 8
-        ? settings.tixuisid.slice(0, 4) + '••••' + settings.tixuisid.slice(-4)
-        : '••••••••';
+      const masked = settings.tixuisid.length > 8 ? settings.tixuisid.slice(0, 4) + '••••' + settings.tixuisid.slice(-4) : '••••••••';
       status.textContent = masked;
       input.value = settings.tixuisid;
       dot.className = 'dot dot--ok';
@@ -247,6 +239,15 @@ const render = {
 
     const warmKillerToggle = $('#setting-warmKiller');
     if (warmKillerToggle) warmKillerToggle.checked = Boolean(settings.warmKiller);
+  },
+
+  scheduleSettings(settings) {
+    SCHEDULE_FIELDS.forEach(({ key, scale }) => {
+      const el = $('#sched-' + key);
+      el.value = settings[key] / scale;
+      // 只有 GET 帶 scheduleDefaults；PATCH 回應沒有時保留既有 placeholder
+      if (settings.scheduleDefaults) el.placeholder = String(settings.scheduleDefaults[key] / scale);
+    });
   },
 
   sitesTable(sites) {
@@ -374,6 +375,7 @@ async function refreshSettings() {
   try {
     const data = await api.getSettings();
     render.cookieStrip(data);
+    render.scheduleSettings(data);
   } catch (err) {
     toast(err.message);
   }
@@ -626,6 +628,32 @@ function bindNotifyToggles() {
   }
 }
 
+// 輪詢排程：畫面上間隔用秒、時段用整點，存檔單位為毫秒與小時（scale 換算）
+const SCHEDULE_FIELDS = [
+  { key: 'scrapeIntervalMs', scale: 1000 },
+  { key: 'ticketplusIntervalMs', scale: 1000 },
+  { key: 'quietStartHour', scale: 1 },
+  { key: 'quietEndHour', scale: 1 },
+  { key: 'quietIntervalMs', scale: 1000 },
+];
+
+function bindScheduleSettings() {
+  SCHEDULE_FIELDS.forEach(({ key, scale }) => {
+    const el = $('#sched-' + key);
+    el.addEventListener('change', async () => {
+      try {
+        // 清空或非數字會送 null，後端維持原值；回寫後端實際存下的值（例如被拉到下限 10 秒）
+        const data = await api.patchSettings({ [key]: Math.round(parseFloat(el.value) * scale) });
+        render.scheduleSettings(data);
+        toast('輪詢排程已更新（下一輪生效）');
+      } catch (err) {
+        toast(err.message);
+        await refreshSettings();
+      }
+    });
+  });
+}
+
 // ===== OCR 驗證器 =====
 
 const ocrHistory = [];
@@ -832,19 +860,19 @@ function bindOcr() {
 function bindLogs() {
   const container = $('#logs-container');
   const autoscroll = $('#logs-autoscroll');
-  
+
   $('#logs-clear-btn').addEventListener('click', () => {
     container.innerHTML = '';
   });
 
   const evtSource = new EventSource('/api/logs/stream');
-  
+
   evtSource.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
       const div = document.createElement('div');
       div.className = 'log-entry';
-      
+
       let timeStr = data.time;
       if (data.time) {
         const d = new Date(data.time);
@@ -860,11 +888,11 @@ function bindLogs() {
         <span class="log-msg">${data.message}</span>
       `;
       container.appendChild(div);
-      
+
       if (autoscroll.checked) {
         container.scrollTop = container.scrollHeight;
       }
-    } catch(err) {
+    } catch (err) {
       // ignore parse errors
     }
   };
@@ -875,20 +903,19 @@ async function refreshStats() {
     const res = await fetch('/api/stats');
     if (!res.ok) return;
     const data = await res.json();
-    
+
     // format uptime
     const sec = Math.floor(data.uptimeMs / 1000);
     const h = String(Math.floor(sec / 3600)).padStart(2, '0');
     const m = String(Math.floor((sec % 3600) / 60)).padStart(2, '0');
     const s = String(sec % 60).padStart(2, '0');
-    
+
     $('#stat-uptime').textContent = `${h}:${m}:${s}`;
     $('#stat-scrapes-total').textContent = data.scrapesTotal.toLocaleString();
     $('#stat-scrapes-success').textContent = data.scrapesSuccess.toLocaleString();
     $('#stat-scrapes-error').textContent = data.scrapesError.toLocaleString();
     $('#stat-captcha-events').textContent = data.captchaEvents.toLocaleString();
     $('#stat-cart-success').textContent = data.cartSuccess.toLocaleString();
-    
   } catch (err) {
     console.error('Failed to fetch stats', err);
   }
@@ -900,15 +927,16 @@ async function init() {
   initTabs();
   bindCookieStrip();
   bindNotifyToggles();
+  bindScheduleSettings();
   bindFormSubmit();
   bindTableActions();
   bindChrome();
   bindOcr();
   bindLogs();
-  
+
   await refreshAll();
   await refreshStats();
-  
+
   poll.start();
   // Poll stats every 5s along with status
   setInterval(refreshStats, 5000);

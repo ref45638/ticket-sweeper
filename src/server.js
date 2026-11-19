@@ -22,11 +22,8 @@ app.use((err, _req, res, _next) => {
 
 const server = app.listen(config.port, async () => {
   log.info('server', `Ticket Sweeper 啟動 http://localhost:${config.port}`);
-  log.info('server', `輪詢間隔 ${config.scrapeIntervalMs / 1000}s，通知冷卻 ${config.notifyCooldownMs / 1000}s`);
-  log.info(
-    'server',
-    `通知通道 LINE=${config.line.enabled() ? 'ON' : 'OFF'} Telegram=${config.telegram.enabled() ? 'ON' : 'OFF'}`
-  );
+  log.info('server', `通知冷卻 ${config.notifyCooldownMs / 1000}s（輪詢間隔見 scheduler 啟動訊息）`);
+  log.info('server', `通知通道 LINE=${config.line.enabled() ? 'ON' : 'OFF'} Telegram=${config.telegram.enabled() ? 'ON' : 'OFF'}`);
 
   if (config.ngrokToken) {
     try {
@@ -37,7 +34,7 @@ const server = app.listen(config.port, async () => {
       });
       log.info('server', `ngrok 已經啟動，您的 LINE Webhook URL 網址為：${listener.url()}/api/webhook`);
       log.info('server', `請將上方網址貼至 LINE Developers Console 的 Webhook URL 欄位並開啟 Use webhook。`);
-      
+
       // 用 Telegraf 註冊 Telegram Webhook
       if (config.telegram.botToken) {
         try {
