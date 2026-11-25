@@ -563,6 +563,8 @@ async function fillQuantityAndAgree(page, desiredQty) {
  * 點擊送出按鈕，回傳是否有按到。
  */
 async function clickSubmit(page) {
+  // 被彈回外層頁時不能亂按：.btn-primary 會命中 game 頁的「立即訂購」
+  if (BOUNCED_PAGE_RE.test(page.url())) return false;
   return page.evaluate(() => {
     const btn = document.querySelector('button[type="submit"], input[type="submit"], .btn-primary, #submitBtn');
     if (btn) {
@@ -632,6 +634,50 @@ async function watchManualCaptcha(page, site, domain) {
   await cleanupKiller(page, domain, { closePage: true });
 }
 
+// 點區後若落在這些頁，代表被拓元彈回（實測：該區剛售完會 alert「此場次/區域已售完」並 302 到 /activity/game）
+const BOUNCED_PAGE_RE = /\/activity\/(game|detail)\/|\/ticket\/area\//;
+const MAX_ZONE_ATTEMPTS = 3;
+
+/**
+ * 在區域頁隨機點一個可購區進入填單頁；被彈回就重新進區域頁改選別區，不在外層頁空等。
+ * 呼叫前 page 需已在區域頁（areaUrl）且列表已載入。
+ * @returns {Promise<{ chosen?: { name: string }, error?: 'soldout' | 'bounced' | 'login' | 'nav-stuck' }>}
+ */
+async function enterTicketPage(page, areaUrl) {
+  for (let zoneAttempt = 1; zoneAttempt <= MAX_ZONE_ATTEMPTS; zoneAttempt++) {
+    if (zoneAttempt > 1) {
+      try {
+        await page.goto(areaUrl, { waitUntil: 'domcontentloaded', timeout: 5000 });
+        await page.waitForSelector(AREA_LIST_SELECTOR, { timeout: 3000 });
+      } catch (err) {
+        log.warn('tixcraft', `[Killer] 重新進區域頁卡住，放棄本次任務: ${err.message}`);
+        return { error: 'nav-stuck' };
+      }
+    }
+
+    // 共用 parseAreaList 標記隨機可購區，於下方點擊
+    const { chosen } = await page.evaluate(parseAreaList, { markRandomAvailable: true });
+    if (!chosen) return { error: 'soldout' };
+
+    log.info('tixcraft', `[Killer] 隨機選擇區域: ${chosen.name}`);
+
+    try {
+      // 點擊被標記的區域連結並等待跳轉，逾時才視為卡住中斷
+      await Promise.all([page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }), page.click('a[data-killer-target="true"]')]);
+    } catch (err) {
+      log.warn('tixcraft', `[Killer] 點擊區域或跳轉失敗，放棄並交回給 Scout 重新發起: ${err.message}`);
+      return { error: 'nav-stuck' };
+    }
+
+    const currentUrl = page.url();
+    if (/\/login|\/member\/login/i.test(currentUrl)) return { error: 'login' };
+    if (!BOUNCED_PAGE_RE.test(currentUrl)) return { chosen };
+
+    log.warn('tixcraft', `[Killer] ${chosen.name} 點下去已售完，被彈回 ${currentUrl}，改選別區 (${zoneAttempt}/${MAX_ZONE_ATTEMPTS})`);
+  }
+  return { error: 'bounced' };
+}
+
 /**
  * 嘗試自動加車流程。
  * 回傳 { success, message }
@@ -681,32 +727,26 @@ async function attemptAddToCart(site) {
         return { success: false, message: 'Killer 多次嘗試載入區域皆卡住，放棄本次任務' };
       }
 
-      // Step 2.5: Killer 判斷有票的區域並隨機選一個（共用 parseAreaList 標記，於下方點擊）
-      const { chosen: clickedAreaInfo } = await killerPage.evaluate(parseAreaList, { markRandomAvailable: true });
+      // Step 2.5 ~ 3: 隨機選一個可購區點進填單頁；點下去剛好售完被彈回時會自動改選別區
+      const { chosen: clickedAreaInfo, error: enterError } = await enterTicketPage(killerPage, site.url);
 
-      if (!clickedAreaInfo) {
+      if (enterError === 'soldout' || enterError === 'bounced') {
         // Scout 偵測到票、但 Killer 趕到時已被搶光——這是有用的「差一點」訊號，主動通知。
         await notifier.sendDirect(`🏃 [${site.label || '拓元演唱會'}] 偵測到有票，但 Killer 趕到時已被搶光（手慢一步）。`);
-        return { success: false, message: 'Killer 找不到可點擊的購票連結（票已售完）' };
+        return {
+          success: false,
+          message: enterError === 'soldout' ? 'Killer 找不到可點擊的購票連結（票已售完）' : `連續 ${MAX_ZONE_ATTEMPTS} 次選區都在點下去時售完，放棄本次任務`,
+        };
       }
-
-      log.info('tixcraft', `[Killer] 隨機選擇區域: ${clickedAreaInfo.name}`);
-
-      try {
-        // 點擊被標記的區域連結並等待跳轉，逾時才視為卡住中斷
-        await Promise.all([killerPage.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 15000 }), killerPage.click('a[data-killer-target="true"]')]);
-      } catch (err) {
-        log.warn('tixcraft', `[Killer] 點擊區域或跳轉失敗，放棄並交回給 Scout 重新發起: ${err.message}`);
-        return { success: false, message: '點擊區域後跳轉卡住，放棄本次任務' };
-      }
-
-      // 檢查是否被導向登入頁面（表示 Cookie 無效）
-      const currentUrl = killerPage.url();
-      if (/\/login|\/member\/login/i.test(currentUrl)) {
+      if (enterError === 'login') {
+        // 被導向登入頁面（表示 Cookie 無效）
         return {
           success: false,
           message: 'TIXUISID 已失效，被導向登入頁面。請更新 Cookie！',
         };
+      }
+      if (enterError) {
+        return { success: false, message: '點擊區域後跳轉卡住，放棄本次任務' };
       }
 
       // Step 4~7: 全自動填單與驗證碼辨識，最多重試 5 次（每次失敗就重整頁面換新驗證碼）
@@ -1176,6 +1216,8 @@ module.exports = {
   fetchAreaHtml,
   detectBlockPage,
   gotoAreaPage,
+  enterTicketPage,
+  clickSubmit,
   CAPTCHA_IMG_SELECTOR,
   CAPTCHA_INPUT_SELECTOR,
 };
