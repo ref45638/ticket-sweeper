@@ -402,29 +402,35 @@ function extractCookieDomain(url) {
 }
 
 /**
- * 注入 TIXUISID Cookie 到當前頁面。
+ * 刪掉會送往 url 的所有 TIXUISID（host-only 與 .domain 版本都算），回傳刪了幾顆。
+ * 一定要用目標網址查：killer 分頁剛開時是 about:blank，用 page.url() 查不到任何 cookie。
  */
-async function injectCookie(page, tixuisid, domain) {
-  const currentUrl = page.url();
-
-  // 先清除所有現存的 TIXUISID，避免出現相同名稱卻不同 domain 導致的雙胞胎 Cookie 衝突
-  const existingCookies = await page.cookies(currentUrl);
-  for (const c of existingCookies) {
-    if (c.name === 'TIXUISID') {
-      await page.deleteCookie({ name: c.name, domain: c.domain, path: c.path });
-    }
+async function deleteTixuisid(page, url) {
+  const olds = (await page.cookies(url)).filter((c) => c.name === 'TIXUISID');
+  for (const c of olds) {
+    await page.deleteCookie({ name: c.name, domain: c.domain, path: c.path });
   }
+  return olds.length;
+}
+
+/**
+ * 每次搶票前強制覆蓋 TIXUISID：先清掉舊的（含拓元發給匿名訪客的那顆），再寫入設定值。
+ * 寫成 host-only（不帶 domain），與拓元伺服器自己發的 TIXUISID 是同一顆，
+ * 伺服器之後若 Set-Cookie 會直接覆蓋，不會長出同名雙胞胎（同名時瀏覽器會先送較舊那顆）。
+ */
+async function injectCookie(page, tixuisid, siteUrl) {
+  const origin = new URL(siteUrl).origin;
+  const removed = await deleteTixuisid(page, origin);
 
   await page.setCookie({
     name: 'TIXUISID',
     value: tixuisid,
-    url: currentUrl.startsWith('http') ? currentUrl : 'https://tixcraft.com',
-    domain: domain,
+    url: origin,
     path: '/',
     httpOnly: true,
     secure: true,
   });
-  log.info('tixcraft', `已注入 TIXUISID Cookie (domain: ${domain}, url: ${currentUrl})`);
+  log.info('tixcraft', `已覆蓋 TIXUISID Cookie (host: ${new URL(origin).hostname}，清掉舊的 ${removed} 顆)`);
 }
 
 /**
@@ -446,14 +452,9 @@ async function removeCookie(page, domain) {
  * 只移除 TIXUISID（回到匿名），保留 cf_clearance 等匿名 cookie 以維持暖狀態。
  * 用於保溫模式：搶完票回匿名，但不丟掉好不容易過 Cloudflare 的成果。
  */
-async function removeLoginCookie(page) {
+async function removeLoginCookie(page, url = page.url()) {
   try {
-    const cookies = await page.cookies(page.url());
-    for (const c of cookies) {
-      if (c.name === 'TIXUISID') {
-        await page.deleteCookie({ name: c.name, domain: c.domain, path: c.path });
-      }
-    }
+    await deleteTixuisid(page, url);
     log.info('tixcraft', '[Killer] 已移除 TIXUISID 回到匿名（保留 CF 暖狀態）');
   } catch (err) {
     log.warn('tixcraft', `移除 TIXUISID 失敗: ${err.message}`);
@@ -700,7 +701,7 @@ async function attemptAddToCart(site) {
 
     try {
       // Step 1: 注入 TIXUISID Cookie
-      await injectCookie(killerPage, site.tixuisid, domain);
+      await injectCookie(killerPage, site.tixuisid, site.url);
 
       // Step 2: 前往活動頁面並實作「遞增式重試 (Backoff Reload)」
       // 一開始用很短的逾時快速重整，卡住才逐次 ×2 拉長，避免瘋狂重整也避免一開始等太久
@@ -1190,7 +1191,7 @@ async function keepKillerWarm() {
 
   try {
     await withPage({ role: 'killer' }, async (page) => {
-      await removeLoginCookie(page).catch(() => {}); // 確保匿名暖機
+      await removeLoginCookie(page, warmUrl).catch(() => {}); // 確保匿名暖機（分頁是 about:blank，須指定網址才刪得到）
       await page.goto(warmUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
       await page.waitForSelector('ul.area-list li, .area-list li, body', { timeout: 8_000 }).catch(() => {});
     });
@@ -1218,6 +1219,8 @@ module.exports = {
   gotoAreaPage,
   enterTicketPage,
   clickSubmit,
+  injectCookie,
+  removeLoginCookie,
   CAPTCHA_IMG_SELECTOR,
   CAPTCHA_INPUT_SELECTOR,
 };
